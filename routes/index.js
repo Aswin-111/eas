@@ -11,6 +11,14 @@ router.post("/login", login);
 
 router.get("/allcust", custController.getAllCust);
 router.post("/shopdetails", custController.getAllShopDetails);
-router.post("/order", custController.order);
+router.post("/orders", custController.orders);
+
+router.post("/addcustdetails", custController.addCustDetails);
+
+router.post("/additemdetails", custController.addItemDetails);
+
+
+
+
 
 export default router;
