@@ -17,8 +17,6 @@ router.post("/addcustdetails", custController.addCustDetails);
 
 router.post("/additemdetails", custController.addItemDetails);
 
-
-
-
+router.post("/addcompdetails", custController.addCompany);
 
 export default router;
