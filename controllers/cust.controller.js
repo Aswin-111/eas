@@ -1,14 +1,15 @@
 import mongoose from "mongoose";
 
-import custMast from "../models/CustMast.js"; // Assuming you have a models directory for database operations
+import CustMast from "../models/CustMast.js"; // Assuming you have a models directory for database operations
 
 import ItemMast from "../models/ItemMast.js";
 
 import OrdMast from "../models/OrdMast.js";
 import OrdTrxfile from "../models/OrdTrxfile.js";
 
-import fs from "fs";
-import CustMast from "../models/CustMast.js";
+import CompMast from "../models/CompMast.js";
+
+import UserMast from "../models/UserMast.js";
 import puppeteer from "puppeteer";
 import pdfkit from "pdfkit";
 const custController = {
@@ -24,18 +25,17 @@ const custController = {
         }
       }
 
-      const customers = await custMast
-        .find(query)
+      const customers = await CustMast.find(query)
         .skip(skip)
         .limit(parseInt(limit));
 
-      const test = await custMast.find({});
+      const test = await CustMast.find({});
 
       console.log(test);
-      const totalCustomers = await custMast.countDocuments(query); // Total matching documents
+      const totalCustomers = await CustMast.countDocuments(query); // Total matching documents
 
       if (customers.length > 0) {
-        const areas = [...new Set(await custMast.distinct("cust_area"))]; // Get unique areas
+        const areas = [...new Set(await CustMast.distinct("cust_area"))]; // Get unique areas
 
         // {
         //   _id: new ObjectId('67b743ed5c59e12e41207b1e'),
@@ -337,14 +337,19 @@ const custController = {
   //   }
   // },
 
- orders : async (req, res) => {
+  orders: async (req, res) => {
     try {
       const { comp_code, user_id, order_details } = req.body;
-  
-      const lastOrder = await OrdMast.findOne({ comp_code }).sort({ ord_no: -1 }).lean();
+
+      const lastOrder = await OrdMast.findOne({ comp_code })
+        .sort({ ord_no: -1 })
+        .lean();
       const ord_no = lastOrder ? lastOrder.ord_no + 1 : 1;
-      const totalAmount = order_details.reduce((sum, item) => sum + item.subtotal, 0);
-  
+      const totalAmount = order_details.reduce(
+        (sum, item) => sum + item.subtotal,
+        0
+      );
+
       const ordMast = new OrdMast({
         comp_code,
         ord_no,
@@ -356,37 +361,163 @@ const custController = {
         user_code: user_id,
         status_flag: "N",
       });
-  
-      const trxItems = order_details.map((item, index) => new OrdTrxfile({
-        comp_code,
-        ord_no,
-        line_no: index + 1,
-        ord_date: new Date().toISOString().split("T")[0],
-        item_name: item.item_name,
-        item_qty: item.qty,
-        item_mrp: item.item_mrp,
-        item_price: item.item_price1,
-        item_tax: item.item_tax,
-        item_disc: item.discount,
-        trx_total: item.subtotal,
-        status_flag: "N",
-      }));
-  
+
+      const trxItems = order_details.map(
+        (item, index) =>
+          new OrdTrxfile({
+            comp_code,
+            ord_no,
+            line_no: index + 1,
+            ord_date: new Date().toISOString().split("T")[0],
+            item_name: item.item_name,
+            item_qty: item.qty,
+            item_mrp: item.item_mrp,
+            item_price: item.item_price1,
+            item_tax: item.item_tax,
+            item_disc: item.discount,
+            trx_total: item.subtotal,
+            status_flag: "N",
+          })
+      );
+
       await ordMast.save();
       await OrdTrxfile.insertMany(trxItems);
-  
-      const htmlBill = await generateHTMLBill(comp_code, ord_no, ordMast, trxItems);
+
+      const htmlBill = await generateHTMLBill(
+        comp_code,
+        ord_no,
+        ordMast,
+        trxItems
+      );
       const pdfBuffer = await generatePdfBuffer(htmlBill);
-  
-      res.set("Content-Disposition", `attachment; filename="bill_${ord_no}.pdf"`);
+
+      res.set(
+        "Content-Disposition",
+        `attachment; filename="bill_${ord_no}.pdf"`
+      );
       res.set("Content-Type", "application/pdf");
       res.send(pdfBuffer);
-  
     } catch (error) {
       console.error("Order Error:", error);
       res.status(500).json({ message: "Order failed", error: error.message });
     }
-  }
+  },
+  deleteCompMast: async (req, res) => {
+    try {
+      const compCode = req.body.comp_code; // Get comp_code from request body
+
+      if (!compCode) {
+        return res
+          .status(400)
+          .json({ message: "comp_code is required in the request body." });
+      }
+
+      const result = await CompMast.deleteMany({ comp_code: compCode });
+
+      if (result.deletedCount > 0) {
+        res.status(200).json({
+          message: `Successfully deleted ${result.deletedCount} company records with comp_code: ${compCode}.`,
+          deletedCount: result.deletedCount,
+        });
+      } else {
+        res.status(404).json({
+          message: `No company records found with comp_code: ${compCode}.`,
+        });
+      }
+    } catch (error) {
+      console.error("Error deleting company records:", error);
+      res
+        .status(500)
+        .json({ message: "Internal server error", error: error.message });
+    }
+  },
+  deleteItemMast: async (req, res) => {
+    try {
+      const compCode = req.body.comp_code; // Get comp_code from request body
+
+      if (!compCode) {
+        return res
+          .status(400)
+          .json({ message: "comp_code is required in the request body." });
+      }
+
+      const result = await ItemMast.deleteMany({ comp_code: compCode });
+
+      if (result.deletedCount > 0) {
+        res.status(200).json({
+          message: `Successfully deleted ${result.deletedCount} item mast  with comp_code: ${compCode}.`,
+          deletedCount: result.deletedCount,
+        });
+      } else {
+        res.status(404).json({
+          message: `item mast records not found with comp_code: ${compCode}.`,
+        });
+      }
+    } catch (error) {
+      console.error("Error deleting company records:", error);
+      res
+        .status(500)
+        .json({ message: "Internal server error", error: error.message });
+    }
+  },
+  deleteUserMast: async (req, res) => {
+    try {
+      const compCode = req.body.comp_code; // Get comp_code from request body
+
+      if (!compCode) {
+        return res
+          .status(400)
+          .json({ message: "comp_code is required in the request body." });
+      }
+
+      const result = await UserMast.deleteMany({ comp_code: compCode });
+
+      if (result.deletedCount > 0) {
+        res.status(200).json({
+          message: `Successfully deleted ${result.deletedCount} user mast records with comp_code: ${compCode}.`,
+          deletedCount: result.deletedCount,
+        });
+      } else {
+        res.status(404).json({
+          message: `usermast records not found with comp_code: ${compCode}.`,
+        });
+      }
+    } catch (error) {
+      console.error("Error deleting user records:", error);
+      res
+        .status(500)
+        .json({ message: "Internal server error", error: error.message });
+    }
+  },
+  deleteCustMast: async (req, res) => {
+    try {
+      const compCode = req.body.comp_code; // Get comp_code from request body
+
+      if (!compCode) {
+        return res
+          .status(400)
+          .json({ message: "comp_code is required in the request body." });
+      }
+
+      const result = await CustMast.deleteMany({ comp_code: compCode });
+
+      if (result.deletedCount > 0) {
+        res.status(200).json({
+          message: `Successfully deleted ${result.deletedCount} custmast records with comp_code: ${compCode}.`,
+          deletedCount: result.deletedCount,
+        });
+      } else {
+        res.status(404).json({
+          message: `custmast records found with comp_code: ${compCode}.`,
+        });
+      }
+    } catch (error) {
+      console.error("Error deleting custmast records:", error);
+      res
+        .status(500)
+        .json({ message: "Internal server error", error: error.message });
+    }
+  },
 };
 
 async function generateHTMLBill(comp_code, ord_no, ordMast, trxItems) {
@@ -445,7 +576,7 @@ async function generatePdfBuffer(html) {
   const browser = await puppeteer.launch();
   const page = await browser.newPage();
   await page.setContent(html);
-  const pdfBuffer = await page.pdf({ format: 'A4' });
+  const pdfBuffer = await page.pdf({ format: "A4" });
   await browser.close();
   return pdfBuffer;
 }

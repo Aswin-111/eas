@@ -15,11 +15,6 @@ const CompMastSchema = new mongoose.Schema({
 
   inv_msgs: { type: String, required: true },
   fin_year: { type: String, required: true },
-
-
-
-
-  
 });
 
 export default mongoose.model("CompMast", CompMastSchema);

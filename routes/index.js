@@ -17,6 +17,13 @@ router.post("/addcustdetails", custController.addCustDetails);
 
 router.post("/additemdetails", custController.addItemDetails);
 
-router.post("/addcompdetails", custController.addCompany);
+router.post("/addcompdetails", custController.addCompanies);
+
+router.post("/addusers", custController.addUsers);
+
+router.post("/deletecompmast", custController.deleteCompMast);
+router.post("/deleteitemmast", custController.deleteItemMast);
+router.post("/delete", custController.deleteItemMast);
+router.post("/deleteitemmast", custController.deleteItemMast);
 
 export default router;
