@@ -1,0 +1,68 @@
+[{
+  "_id": {
+    "$oid": "679f62a78e512f033a99016f"
+  },
+  "comp_code": "1001",
+  "user_id": "1",
+  "user_name": "afsal123",
+  "user_password": "pass@123",
+  "user_type": "0",
+  "__v": 0,
+  "createdAt": {
+    "$date": "2025-02-02T12:18:47.599Z"
+  },
+  "updatedAt": {
+    "$date": "2025-02-02T12:18:47.599Z"
+  }
+},
+{
+  "_id": {
+    "$oid": "679f62a78e512f033a990170"
+  },
+  "comp_code": "10001",
+  "user_id": "2",
+  "user_name": "nevin123",
+  "user_password": "pass",
+  "user_type": "1",
+  "__v": 0,
+  "createdAt": {
+    "$date": "2025-02-02T12:18:47.600Z"
+  },
+  "updatedAt": {
+    "$date": "2025-02-02T12:18:47.600Z"
+  }
+},
+{
+  "_id": {
+    "$oid": "679f62a78e512f033a990171"
+  },
+  "comp_code": "10000",
+  "user_id": "3",
+  "user_name": "contra123",
+  "user_password": "pass3",
+  "user_type": "0",
+  "__v": 0,
+  "createdAt": {
+    "$date": "2025-02-02T12:18:47.600Z"
+  },
+  "updatedAt": {
+    "$date": "2025-02-02T12:18:47.600Z"
+  }
+},
+{
+  "_id": {
+    "$oid": "679f62a78e512f033a990172"
+  },
+  "comp_code": "10001",
+  "user_id": "4",
+  "user_name": "mario123",
+  "user_password": "pass4",
+  "user_type": "0",
+  "__v": 0,
+  "createdAt": {
+    "$date": "2025-02-02T12:18:47.600Z"
+  },
+  "updatedAt": {
+    "$date": "2025-02-02T12:18:47.600Z"
+  }
+}]

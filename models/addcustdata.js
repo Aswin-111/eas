@@ -1,4 +1,6 @@
-import CustMast from "./ItemMast.js"; // Adjust the path to your model file
+// models/addcustdata.js
+import ItemMast from "./ItemMast.js";
+
 import mongoose from "mongoose";
 const connectDB = async () => {
   try {
@@ -339,7 +341,8 @@ async function addAlappuzhaShops() {
       },
     ];
 
-    await CustMast.insertMany(shops);
+    await ItemMast.insertMany(shops);
+
     console.log("10 Alappuzha shops added successfully.");
     mongoose.disconnect();
   } catch (error) {

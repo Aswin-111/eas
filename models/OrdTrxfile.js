@@ -4,7 +4,7 @@ const ordTrxfileSchema = new mongoose.Schema(
   {
     comp_code: { type: String, required: true },
     ord_no: { type: Number, required: true },
-    line_no: { type: Number, required: true, autoIncrement: true },
+    line_no: { type: Number, required: true },
     ord_date: { type: String },
     item_code: { type: String },
     item_name: { type: String },

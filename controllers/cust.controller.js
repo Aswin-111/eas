@@ -12,81 +12,130 @@ import CompMast from "../models/CompMast.js";
 import UserMast from "../models/UserMast.js";
 import puppeteer from "puppeteer";
 import pdfkit from "pdfkit";
+import bcrypt from "bcryptjs";
+async function getLatestCustNumber(comp_code) {
+  const comp = String(comp_code);
+
+  const result = await CustMast.aggregate([
+    { $match: { comp_code: comp } },
+
+    // extract starting digits from cust_code
+    {
+      $addFields: {
+        cust_num_str: {
+          $getField: {
+            field: "match",
+            input: {
+              $regexFind: { input: "$cust_code", regex: /^[0-9]+/ },
+            },
+          },
+        },
+      },
+    },
+
+    // convert to int (if no match -> null)
+    {
+      $addFields: {
+        cust_num: {
+          $cond: [
+            { $ifNull: ["$cust_num_str", false] },
+            { $toInt: "$cust_num_str" },
+            null,
+          ],
+        },
+      },
+    },
+
+    { $match: { cust_num: { $ne: null } } },
+    { $sort: { cust_num: -1 } },
+    { $limit: 1 },
+    { $project: { cust_num: 1 } },
+  ]);
+
+  return result.length ? result[0].cust_num : 0;
+}
 const custController = {
   getAllCust: async (req, res) => {
     try {
-      const { page = 1, limit = 10, area } = req.query; // Get query parameters
-      const skip = (page - 1) * limit;
+      const comp_code = req.comp_code; // from token
+      console.log("comp_code from token:", comp_code, typeof comp_code);
 
-      let query = {}; // Base query
-      if (area) {
-        if (area !== null && area !== undefined && area !== "") {
-          query = { cust_area: area }; // Filter by area if provided
-        }
-      }
+      const pageNum = Number(req.query.page || 1);
+      const limitNum = Number(req.query.limit || 10);
+      const skip = (pageNum - 1) * limitNum;
 
-      const customers = await CustMast.find(query)
-        .skip(skip)
-        .limit(parseInt(limit));
+      const area = req.query.area;
 
-      const test = await CustMast.find({});
+      // Build comp_code variants safely
+      const compStr = String(comp_code);
+      const compNum = Number(comp_code);
+      const compVariants = Number.isNaN(compNum) ? [compStr] : [compStr, compNum];
 
-      console.log(test);
-      const totalCustomers = await CustMast.countDocuments(query); // Total matching documents
+      const query = {
+        comp_code: { $in: compVariants },
+        ...(area ? { cust_area: area } : {}),
+      };
 
-      if (customers.length > 0) {
-        const areas = [...new Set(await CustMast.distinct("cust_area"))]; // Get unique areas
+      // 🔍 DEBUG: verify data exists in the same collection
+      const totalMatching = await CustMast.countDocuments(query);
+      const totalAll = await CustMast.countDocuments({});
+      const sampleAny = await CustMast.findOne({});
+      const sampleForComp = await CustMast.findOne({ comp_code: { $in: compVariants } });
 
-        // {
-        //   _id: new ObjectId('67b743ed5c59e12e41207b1e'),
-        //   comp_code: 1,
-        //   cust_code: 1010,
-        //   cust_name: 'Metro Stationary',
-        //   cust_address: 'Pulinkunnu Junction',
-        //   cust_phone: '9098765432',
-        //   cust_area: 'Pulinkunnu',
-        //   cust_type: 'R',
-        //   cust_gst: '0123456789JKLMNOP',
-        //   Old_bal: 900,
-        //   __v: 0,
-        //   createdAt: 2025-02-20T15:02:05.992Z,
-        //   updatedAt: 2025-02-20T15:02:05.992Z
-        // }
-        const responseData = {
-          users: customers.map((customer) => ({
-            cust_code: customer.cust_code,
-            cust_name: customer.cust_name,
-            cust_phone: customer.cust_phone || "N/A",
-            cust_address: customer.cust_address || "N/A",
-            cust_area: customer.cust_area,
+      console.log("DEBUG query:", query);
+      console.log("DEBUG totalAll:", totalAll);
+      console.log("DEBUG totalMatching:", totalMatching);
+      console.log("DEBUG sampleAny:", sampleAny?.comp_code, typeof sampleAny?.comp_code);
+      console.log("DEBUG sampleForComp:", sampleForComp?.comp_code, typeof sampleForComp?.comp_code);
 
-            cust_type: customer.cust_type,
-            cust_gst: customer.cust_gst,
-            old_bal: customer.Old_bal,
-          })),
-          areas: areas,
-          total: totalCustomers, // Send total count (optional)
-        };
-
-        return res.status(200).json(responseData);
-      } else {
+      const customers = await CustMast.find(query).sort({ createdAt: -1 }).skip(skip).limit(limitNum);
+      console.log(customers)
+      if (customers.length === 0) {
         return res.status(404).json({ message: "No customers found" });
       }
+
+      const areas = await CustMast.distinct("cust_area", {
+        comp_code: { $in: compVariants },
+      });
+
+      return res.status(200).json({
+        users: customers.map((customer) => ({
+          cust_code: customer.cust_code,
+          cust_name: customer.cust_name,
+          cust_phone: customer.cust_phone || "N/A",
+          cust_address: customer.cust_address || "N/A",
+          cust_area: customer.cust_area,
+          cust_type: customer.cust_type,
+          cust_gst: customer.cust_gst,
+          old_bal: customer.Old_bal,
+        })),
+        areas,
+        total: totalMatching,
+      });
     } catch (error) {
-      return res
-        .status(500)
-        .json({ message: "Internal server error", error: error.message });
+      console.error("getAllCust error:", error);
+      return res.status(500).json({
+        message: "Internal server error",
+        error: error.message,
+      });
     }
   },
+
+
+
+
+
   getAllShopDetails: async (req, res) => {
     try {
-      const { comp_code } = req.body;
-      const shopDetails = await ItemMast.find({ comp_code: comp_code });
+      const comp_code = req.comp_code;
+      const shopDetails = await ItemMast.find({ comp_code: String(comp_code) });
+
+
       // console.log(shopDetails, "werty");
       if (shopDetails.length > 0) {
         return res.status(200).json(shopDetails);
       } else {
-        return res.status(500).json({ message: "Shops data not found!" });
+        return res.status(400).json({ message: "Shops data not found!" });
       }
     } catch (error) {
       res
@@ -220,32 +269,47 @@ const custController = {
 
       const users = req.body;
 
-      // Validate each user object against the schema
+      // Validate each user object
       for (const user of users) {
-        const { comp_code, user_id, user_name, user_password, user_type } =
-          user;
+        const { comp_code, user_id, user_name, user_password } = user;
 
         if (!comp_code || !user_id || !user_name) {
           return res.status(400).json({
-            message:
-              "One or more required fields are missing in a user object.",
+            message: "One or more required fields are missing in a user object.",
           });
         }
 
-        // Additional validation if needed (e.g., password complexity, user type restrictions)
+        // enforce password presence for new users
+        if (!user_password || String(user_password).trim().length < 4) {
+          return res.status(400).json({
+            message: `Password is required (min 4 chars) for user_id: ${user_id}`,
+          });
+        }
       }
 
-      // Bulk insert the users
-      const insertedUsers = await UserMast.insertMany(users);
+      // Hash passwords
+      const SALT_ROUNDS = 10;
 
-      res.status(201).json({
+      const usersToInsert = await Promise.all(
+        users.map(async (u) => {
+          const hashed = await bcrypt.hash(String(u.user_password), SALT_ROUNDS);
+          return {
+            ...u,
+            user_password: hashed,
+          };
+        })
+      );
+
+      const insertedUsers = await UserMast.insertMany(usersToInsert);
+
+      return res.status(201).json({
         message: "Users created successfully",
         data: insertedUsers,
       });
     } catch (error) {
       console.error("Error creating users:", error);
+
       if (error instanceof mongoose.Error.ValidationError) {
-        // Handle Mongoose validation errors
         const validationErrors = {};
         for (const field in error.errors) {
           validationErrors[field] = error.errors[field].message;
@@ -254,17 +318,280 @@ const custController = {
           .status(400)
           .json({ message: "Validation error", errors: validationErrors });
       }
+
       if (error.code === 11000) {
-        // Handle duplicate key error
         return res
           .status(400)
           .json({ message: "Duplicate comp_code and user_id combination." });
       }
-      res
+
+      return res
         .status(500)
         .json({ message: "Internal server error", error: error.message });
     }
   },
+  createCustomer: async (req, res) => {
+    try {
+      const {
+
+        cust_name,
+        cust_address,
+        cust_phone,
+        cust_area,
+        cust_type,
+        cust_gst,
+        Old_bal,
+      } = req.body;
+      const comp_code = req.comp_code;
+      if (!cust_name) {
+        return res.status(400).json({ message: "cust_name is required" });
+      }
+
+      const latest = await getLatestCustNumber(comp_code);
+      const next = latest + 1;
+
+      // ✅ online code = number + *
+      const newCustCode = `${next}*`;
+
+      const created = await CustMast.create({
+        comp_code: String(comp_code),
+        cust_code: newCustCode,
+        cust_name,
+        cust_address,
+        cust_phone,
+        cust_area,
+        cust_type: cust_type || "R",
+        cust_gst,
+        Old_bal,
+      });
+
+      return res.status(201).json({
+        message: "Customer created successfully",
+        data: created,
+      });
+    } catch (error) {
+      if (error?.code === 11000) {
+        return res.status(409).json({
+          message: "cust_code conflict. Retry creating customer.",
+        });
+      }
+
+      return res.status(500).json({ message: "Internal server error", error: error.message });
+    }
+  },
+  getOrderReports: async (req, res) => {
+    try {
+      const comp_code = String(req.comp_code).trim();
+      const user_code = String(req.user?.user_id || "").trim(); // user who logged in
+
+      if (!comp_code || !user_code) {
+        return res.status(401).json({ message: "Invalid token context" });
+      }
+
+      // Query params
+      const pageNum = Number(req.query.page || 1);
+      const limitNum = Number(req.query.limit || 10);
+      const skip = (pageNum - 1) * limitNum;
+
+      // Moment-style date range input (YYYY-MM-DD)
+      // e.g. ?from=2025-12-01&to=2025-12-20
+      const from = req.query.from ? String(req.query.from).trim() : null;
+      const to = req.query.to ? String(req.query.to).trim() : null;
+
+      // Status filter: allow single or multiple
+      // e.g. ?status=N or ?status=Y or ?status=N,Y
+      // also support ?pending=true&billed=true (optional)
+      const statusRaw = req.query.status ? String(req.query.status).trim() : null;
+
+      const pendingFlag = String(req.query.pending || "").toLowerCase() === "true";
+      const billedFlag = String(req.query.billed || "").toLowerCase() === "true";
+
+      let statuses = [];
+      if (statusRaw) {
+        statuses = statusRaw
+          .split(",")
+          .map((s) => s.trim().toUpperCase())
+          .filter((s) => s === "N" || s === "Y");
+      } else {
+        if (pendingFlag) statuses.push("N");
+        if (billedFlag) statuses.push("Y");
+      }
+      // if none provided → no status filter (return all)
+
+      // Build Mongo query
+      const query = {
+        comp_code,
+        user_code, // only this user's orders
+      };
+
+      // date range filter (ord_date stored as string "YYYY-MM-DD")
+      if (from && to) {
+        query.ord_date = { $gte: from, $lte: to };
+      } else if (from) {
+        query.ord_date = { $gte: from };
+      } else if (to) {
+        query.ord_date = { $lte: to };
+      }
+
+      // status filter
+      if (statuses.length === 1) {
+        query.status_flag = statuses[0];
+      } else if (statuses.length > 1) {
+        query.status_flag = { $in: statuses };
+      }
+
+      // 1) Get paginated data (newest first)
+      const orders = await OrdMast.find(query)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .lean();
+
+      // 2) Total count for pagination
+      const total = await OrdMast.countDocuments(query);
+
+      // 3) Subtotals for the FILTERED DATA (not only the page)
+      const totalsAgg = await OrdMast.aggregate([
+        { $match: query },
+        {
+          $group: {
+            _id: null,
+            sum_trx_total: { $sum: { $ifNull: ["$trx_total", 0] } },
+            sum_trx_netamount: { $sum: { $ifNull: ["$trx_netamount", 0] } },
+            count: { $sum: 1 },
+          },
+        },
+      ]);
+
+      const totals = totalsAgg.length
+        ? {
+          trx_total: totalsAgg[0].sum_trx_total || 0,
+          trx_netamount: totalsAgg[0].sum_trx_netamount || 0,
+          count: totalsAgg[0].count || 0,
+        }
+        : { trx_total: 0, trx_netamount: 0, count: 0 };
+
+      return res.status(200).json({
+        filters: {
+          from,
+          to,
+          statuses: statuses.length ? statuses : "ALL",
+        },
+        pagination: {
+          page: pageNum,
+          limit: limitNum,
+          total,
+          totalPages: Math.ceil(total / limitNum),
+        },
+        subtotal: totals, // subtotal of FILTERED data
+        data: orders,
+      });
+    } catch (error) {
+      console.error("getOrderReports error:", error);
+      return res.status(500).json({
+        message: "Internal server error",
+        error: error.message,
+      });
+    }
+  },
+  getOrderDetails: async (req, res) => {
+    try {
+      const comp_code = String(req.comp_code).trim();
+      const user_code = String(req.user?.user_id || "").trim(); // optional validation
+      const ord_no = Number(req.params.ord_no);
+
+      if (!comp_code || !ord_no) {
+        return res.status(400).json({
+          message: "comp_code and ord_no are required",
+        });
+      }
+
+      // 1️⃣ Fetch Order Master
+      const order = await OrdMast.findOne({
+        comp_code,
+        ord_no,
+        user_code, // 🔒 ensures user can only view their own orders
+      }).lean();
+
+      if (!order) {
+        return res.status(404).json({
+          message: "Order not found",
+        });
+      }
+
+      // 2️⃣ Fetch Order Line Items
+      const items = await OrdTrxfile.find({
+        comp_code,
+        ord_no,
+      })
+        .sort({ line_no: 1 })
+        .lean();
+
+      // 3️⃣ Calculate totals from items (safe recalculation)
+      const summary = items.reduce(
+        (acc, item) => {
+          acc.total_qty += Number(item.item_qty || 0);
+          acc.subtotal += Number(item.trx_total || 0);
+          acc.tax += Number(item.item_tax || 0);
+          acc.discount += Number(item.item_disc || 0);
+          return acc;
+        },
+        {
+          total_qty: 0,
+          subtotal: 0,
+          tax: 0,
+          discount: 0,
+        }
+      );
+
+      return res.status(200).json({
+        order: {
+          ord_no: order.ord_no,
+          ord_date: order.ord_date,
+          ord_time: order.ord_time,
+          status: order.status_flag === "Y" ? "BILLED" : "PENDING",
+
+          customer: {
+            code: order.act_code,
+            name: order.act_name,
+            phone: order.act_phone,
+            address: order.act_address,
+            area: order.act_area,
+          },
+
+          totals: {
+            trx_total: order.trx_total,
+            trx_netamount: order.trx_netamount,
+          },
+        },
+
+        items: items.map((item) => ({
+          line_no: item.line_no,
+          item_code: item.item_code,
+          item_name: item.item_name,
+          qty: item.item_qty,
+          mrp: item.item_mrp,
+          price: item.item_price,
+          tax: item.item_tax,
+          discount: item.item_disc,
+          cess: item.item_cess,
+          total: item.trx_total,
+        })),
+
+        computed_summary: summary, // recalculated from line items
+      });
+    } catch (error) {
+      console.error("getOrderDetails error:", error);
+      return res.status(500).json({
+        message: "Internal server error",
+        error: error.message,
+      });
+    }
+  },
+
+
+
+
   // orders: async (req, res) => {
   //   try {
   //     const { comp_code, user_id, order_details } = req.body;
@@ -339,8 +666,9 @@ const custController = {
 
   orders: async (req, res) => {
     try {
-      const { comp_code, user_id, order_details } = req.body;
-
+      const { order_details } = req.body;
+      const comp_code = req.comp_code;
+      const user_id = req.user?.user_id;
       const lastOrder = await OrdMast.findOne({ comp_code })
         .sort({ ord_no: -1 })
         .lean();
@@ -521,63 +849,216 @@ const custController = {
 };
 
 async function generateHTMLBill(comp_code, ord_no, ordMast, trxItems) {
-  // Fetch company details (assuming you have a CompMast model)
-  // const companyDetails = await CompMast.findOne({ comp_code }); // You will have to create this model and import it
+  const total = Number(ordMast.trx_total || 0);
+  const net = Number(ordMast.trx_netamount || total);
 
-  // Construct HTML bill content
-  let htmlBill = `
+  const rowsHtml = trxItems
+    .map(
+      (item, index) => `
+      <tr>
+        <td>${index + 1}</td>
+        <td>${item.item_name}</td>
+        <td class="num">${item.item_qty}</td>
+        <td class="num">${Number(item.item_mrp || 0).toFixed(2)}</td>
+        <td class="num">${Number(item.item_price || 0).toFixed(2)}</td>
+        <td class="num">${Number(item.item_tax || 0).toFixed(2)}</td>
+        <td class="num">${Number(item.item_disc || 0).toFixed(2)}</td>
+        <td class="num">${Number(item.trx_total || 0).toFixed(2)}</td>
+      </tr>
+    `
+    )
+    .join("");
+
+  const html = `
     <!DOCTYPE html>
     <html>
-    <head>
-      <title>Bill - ${ord_no}</title>
-      <style>
-        body { font-family: sans-serif; margin: 20px; }
-        .bill-container { width: 800px; margin: 0 auto; border: 1px solid #ccc; padding: 20px; }
-        .bill-header { text-align: center; margin-bottom: 20px; }
-        .bill-table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
-        .bill-table th, .bill-table td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-        .bill-table th { background-color: #f2f2f2; }
-        .bill-total { text-align: right; font-weight: bold; }
-      </style>
-    </head>
-    <body>
-      <div class="bill-container">
-        <div class="bill-header"><h1>Invoice</h1></div>
-        <p>Order Number: ${ord_no}</p>
-        <p>Date: ${ordMast.ord_date}</p>
-        <p>Time: ${ordMast.ord_time}</p>
-        <table class="bill-table">
-          <thead><tr><th>Item</th><th>Quantity</th><th>Price</th><th>Total</th></tr></thead>
-          <tbody>
-            ${trxItems
-              .map(
-                (item) => `
-              <tr>
-                <td>${item.item_name}</td>
-                <td>${item.item_qty}</td>
-                <td>$${item.item_price.toFixed(2)}</td>
-                <td>$${item.trx_total.toFixed(2)}</td>
-              </tr>
-            `
-              )
-              .join("")}
-          </tbody>
-        </table>
-        <div class="bill-total"><strong>Total: $${ordMast.trx_total.toFixed(
-          2
-        )}</strong></div>
-      </div>
-    </body>
+      <head>
+        <meta charset="utf-8" />
+        <title>Bill - ${ord_no}</title>
+        <style>
+          * {
+            box-sizing: border-box;
+          }
+          body {
+            margin: 0;
+            padding: 16px;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+              Roboto, Helvetica, Arial, sans-serif;
+            background: #f4f4f8;
+            font-size: 12px;
+            color: #222;
+          }
+          .wrapper {
+            max-width: 640px;
+            margin: 0 auto;
+          }
+          .card {
+            background: #fff;
+            border-radius: 8px;
+            padding: 16px 18px 20px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+          }
+
+          .header-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 12px;
+          }
+          .brand {
+            font-size: 18px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+          }
+          .invoice-title {
+            font-size: 16px;
+            font-weight: 600;
+            text-align: right;
+          }
+
+          .meta {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 12px;
+            font-size: 11px;
+          }
+          .meta-block {
+            flex: 1;
+          }
+          .meta-label {
+            font-weight: 600;
+          }
+          .meta-row {
+            margin-bottom: 2px;
+          }
+
+          table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 8px;
+          }
+          th, td {
+            padding: 6px 5px;
+            border-bottom: 1px solid #e1e1e6;
+          }
+          th {
+            background: #fafafa;
+            font-weight: 600;
+            font-size: 11px;
+          }
+          td {
+            font-size: 11px;
+          }
+          .num {
+            text-align: right;
+            white-space: nowrap;
+          }
+          .totals {
+            margin-top: 10px;
+            font-size: 12px;
+          }
+          .totals-row {
+            display: flex;
+            justify-content: flex-end;
+          }
+          .totals-label {
+            font-weight: 600;
+            margin-right: 8px;
+          }
+          .totals-value {
+            min-width: 80px;
+            text-align: right;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="wrapper">
+          <div class="card">
+            <div class="header-top">
+              <div>
+                <div class="brand">Company ${comp_code}</div>
+                <div style="font-size:11px;color:#666;">Invoice / Bill</div>
+              </div>
+              <div class="invoice-title">
+                Bill #${ord_no}
+              </div>
+            </div>
+
+            <div class="meta">
+              <div class="meta-block">
+                <div class="meta-row"><span class="meta-label">Order No:</span> ${ord_no}</div>
+                <div class="meta-row"><span class="meta-label">Date:</span> ${ordMast.ord_date}</div>
+                <div class="meta-row"><span class="meta-label">Time:</span> ${ordMast.ord_time}</div>
+              </div>
+              <div class="meta-block">
+                <div class="meta-row"><span class="meta-label">Customer Code:</span> ${ordMast.act_code || "-"}</div>
+                <div class="meta-row"><span class="meta-label">Customer Name:</span> ${ordMast.act_name || "-"}</div>
+              </div>
+            </div>
+
+            <table>
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Item</th>
+                  <th class="num">Qty</th>
+                  <th class="num">MRP</th>
+                  <th class="num">Rate</th>
+                  <th class="num">Tax %</th>
+                  <th class="num">Disc</th>
+                  <th class="num">Subtotal</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${rowsHtml}
+              </tbody>
+            </table>
+
+            <div class="totals">
+              <div class="totals-row">
+                <div class="totals-label">Total:</div>
+                <div class="totals-value">${total.toFixed(2)}</div>
+              </div>
+              <div class="totals-row">
+                <div class="totals-label">Net Amount:</div>
+                <div class="totals-value">${net.toFixed(2)}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </body>
     </html>
   `;
-  return htmlBill;
+
+  return html;
 }
+
+// Puppeteer PDF with better sizing
 async function generatePdfBuffer(html) {
-  const browser = await puppeteer.launch();
-  const page = await browser.newPage();
-  await page.setContent(html);
-  const pdfBuffer = await page.pdf({ format: "A4" });
-  await browser.close();
-  return pdfBuffer;
+  const browser = await puppeteer.launch({
+    headless: true,
+    args: ["--no-sandbox", "--disable-setuid-sandbox"],
+  });
+
+  try {
+    const page = await browser.newPage();
+    await page.setContent(html, { waitUntil: "networkidle0" });
+
+    const pdfBuffer = await page.pdf({
+      format: "A5",            // smaller page → looks bigger on mobile
+      printBackground: true,
+      margin: {
+        top: "8mm",
+        right: "8mm",
+        bottom: "8mm",
+        left: "8mm",
+      },
+    });
+
+    return pdfBuffer;
+  } finally {
+    await browser.close();
+  }
 }
 export default custController;

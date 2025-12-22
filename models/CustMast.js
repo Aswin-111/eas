@@ -1,9 +1,10 @@
+// models/CustMast.js
 import mongoose from "mongoose";
 
 const custMastSchema = new mongoose.Schema(
   {
-    comp_code: { type: Number, required: true },
-    cust_code: { type: Number, required: true },
+    comp_code: { type: String, required: true }, // was Number -> make consistent with rest
+    cust_code: { type: String, required: true }, // was Number -> MUST be String for "*"
     cust_name: { type: String, required: true },
     cust_address: { type: String },
     cust_phone: { type: String },
