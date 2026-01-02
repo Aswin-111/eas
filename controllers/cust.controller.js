@@ -1,5 +1,5 @@
 import mongoose from "mongoose";
-
+import { z } from "zod";
 import CustMast from "../models/CustMast.js"; // Assuming you have a models directory for database operations
 
 import ItemMast from "../models/ItemMast.js";
@@ -13,6 +13,46 @@ import UserMast from "../models/UserMast.js";
 import puppeteer from "puppeteer";
 import pdfkit from "pdfkit";
 import bcrypt from "bcryptjs";
+
+// ==========================================
+// ✅ ADD THESE SCHEMAS & HELPERS
+// ==========================================
+
+const formatZodError = (error) => {
+  return error.errors.map((e) => ({
+    field: e.path.join("."),
+    message: e.message,
+  }));
+};
+
+// 1. Item Master Schema
+const itemMastSchema = z.array(
+  z.object({
+    comp_code: z.string().min(1, "comp_code is required"),
+    item_code: z.string().min(1, "item_code is required"), // Key for matching
+    item_name: z.string().optional(),
+    // .passthrough() allows other DB fields to pass through
+  }).catchall(z.any())
+);
+
+// 2. Customer Master Schema
+const custMastSchema = z.array(
+  z.object({
+    comp_code: z.string().min(1, "comp_code is required"),
+    cust_code: z.string().min(1, "cust_code is required"), // Key for matching
+    cust_name: z.string().optional(),
+  }).catchall(z.any())
+);
+
+// 3. User Master Schema
+const userMastSchema = z.array(
+  z.object({
+    comp_code: z.string().min(1, "comp_code is required"),
+    user_id: z.string().min(1, "user_id is required"), // Key for matching
+    user_name: z.string().optional(),
+    user_password: z.string().optional(),
+  }).catchall(z.any())
+);
 async function getLatestCustNumber(comp_code) {
   const comp = String(comp_code);
 
@@ -382,27 +422,20 @@ const custController = {
   getOrderReports: async (req, res) => {
     try {
       const comp_code = String(req.comp_code).trim();
-      const user_code = String(req.user?.user_id || "").trim(); // user who logged in
+      const user_code = String(req.user?.user_id || "").trim();
 
       if (!comp_code || !user_code) {
         return res.status(401).json({ message: "Invalid token context" });
       }
 
-      // Query params
       const pageNum = Number(req.query.page || 1);
       const limitNum = Number(req.query.limit || 10);
       const skip = (pageNum - 1) * limitNum;
 
-      // Moment-style date range input (YYYY-MM-DD)
-      // e.g. ?from=2025-12-01&to=2025-12-20
       const from = req.query.from ? String(req.query.from).trim() : null;
       const to = req.query.to ? String(req.query.to).trim() : null;
 
-      // Status filter: allow single or multiple
-      // e.g. ?status=N or ?status=Y or ?status=N,Y
-      // also support ?pending=true&billed=true (optional)
       const statusRaw = req.query.status ? String(req.query.status).trim() : null;
-
       const pendingFlag = String(req.query.pending || "").toLowerCase() === "true";
       const billedFlag = String(req.query.billed || "").toLowerCase() === "true";
 
@@ -416,43 +449,96 @@ const custController = {
         if (pendingFlag) statuses.push("N");
         if (billedFlag) statuses.push("Y");
       }
-      // if none provided → no status filter (return all)
 
-      // Build Mongo query
-      const query = {
+      const matchQuery = {
         comp_code,
-        user_code, // only this user's orders
+        user_code,
       };
 
-      // date range filter (ord_date stored as string "YYYY-MM-DD")
       if (from && to) {
-        query.ord_date = { $gte: from, $lte: to };
+        matchQuery.ord_date = { $gte: from, $lte: to };
       } else if (from) {
-        query.ord_date = { $gte: from };
+        matchQuery.ord_date = { $gte: from };
       } else if (to) {
-        query.ord_date = { $lte: to };
+        matchQuery.ord_date = { $lte: to };
       }
 
-      // status filter
       if (statuses.length === 1) {
-        query.status_flag = statuses[0];
+        matchQuery.status_flag = statuses[0];
       } else if (statuses.length > 1) {
-        query.status_flag = { $in: statuses };
+        matchQuery.status_flag = { $in: statuses };
       }
 
-      // 1) Get paginated data (newest first)
-      const orders = await OrdMast.find(query)
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limitNum)
-        .lean();
+      /* ===============================
+         1️⃣ PAGINATED DATA WITH CUSTOMER NAME
+         =============================== */
+      const orders = await OrdMast.aggregate([
+        { $match: matchQuery },
 
-      // 2) Total count for pagination
-      const total = await OrdMast.countDocuments(query);
+        {
+          $lookup: {
+            from: "custmasts",
+            let: {
+              compCode: "$comp_code",
+              actCode: "$act_code"
+            },
+            pipeline: [
+              {
+                $addFields: {
+                  cust_code_num: {
+                    $toInt: {
+                      $getField: {
+                        field: "match",
+                        input: {
+                          $regexFind: { input: "$cust_code", regex: /^[0-9]+/ },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+              {
+                $match: {
+                  $expr: {
+                    $and: [
+                      { $eq: ["$comp_code", "$$compCode"] },
+                      { $eq: ["$cust_code_num", { $add: [1000, { $toInt: "$$actCode" }] }] }
+                    ],
+                  },
+                },
+              },
+              { $project: { cust_name: 1, _id: 0 } },
+            ],
+            as: "customer",
+          },
+        }
+        ,
 
-      // 3) Subtotals for the FILTERED DATA (not only the page)
+        {
+          $addFields: {
+            cust_name: {
+              $ifNull: [{ $arrayElemAt: ["$customer.cust_name", 0] }, "-"],
+            },
+          },
+        },
+
+        { $project: { customer: 0 } },
+
+        { $sort: { createdAt: -1 } },
+        { $skip: skip },
+        { $limit: limitNum },
+      ]);
+
+      /* ===============================
+         2️⃣ TOTAL COUNT
+         =============================== */
+      const total = await OrdMast.countDocuments(matchQuery);
+
+      /* ===============================
+         3️⃣ SUBTOTAL OF FILTERED DATA
+         =============================== */
       const totalsAgg = await OrdMast.aggregate([
-        { $match: query },
+        { $match: matchQuery },
         {
           $group: {
             _id: null,
@@ -465,9 +551,9 @@ const custController = {
 
       const totals = totalsAgg.length
         ? {
-          trx_total: totalsAgg[0].sum_trx_total || 0,
-          trx_netamount: totalsAgg[0].sum_trx_netamount || 0,
-          count: totalsAgg[0].count || 0,
+          trx_total: totalsAgg[0].sum_trx_total,
+          trx_netamount: totalsAgg[0].sum_trx_netamount,
+          count: totalsAgg[0].count,
         }
         : { trx_total: 0, trx_netamount: 0, count: 0 };
 
@@ -483,7 +569,7 @@ const custController = {
           total,
           totalPages: Math.ceil(total / limitNum),
         },
-        subtotal: totals, // subtotal of FILTERED data
+        subtotal: totals,
         data: orders,
       });
     } catch (error) {
@@ -494,6 +580,7 @@ const custController = {
       });
     }
   },
+
   getOrderDetails: async (req, res) => {
     try {
       const comp_code = String(req.comp_code).trim();
@@ -846,6 +933,168 @@ const custController = {
         .json({ message: "Internal server error", error: error.message });
     }
   },
+
+
+  syncItemMast: async (req, res) => {
+    try {
+      // 1. Validate
+      const validation = itemMastSchema.safeParse(req.body);
+      if (!validation.success) {
+        return res.status(400).json({
+          message: "Validation Failed",
+          errors: formatZodError(validation.error),
+        });
+      }
+
+      const items = validation.data;
+      if (items.length === 0) {
+        return res.status(200).json({ message: "No items to sync." });
+      }
+
+      // 2. Prepare Bulk Ops (Match comp_code AND item_code)
+      const bulkOps = items.map((item) => ({
+        updateOne: {
+          filter: {
+            comp_code: String(item.comp_code),
+            item_code: String(item.item_code),
+          },
+          update: { $set: item }, // Replace fields from JSON into DB
+          upsert: true, // Create if not found
+        },
+      }));
+
+      // 3. Execute
+      const result = await ItemMast.bulkWrite(bulkOps);
+
+      return res.status(200).json({
+        message: "Item Master synced successfully",
+        details: {
+          matched: result.matchedCount,
+          modified: result.modifiedCount,
+          upserted: result.upsertedCount,
+        },
+      });
+    } catch (error) {
+      console.error("syncItemMast error:", error);
+      return res
+        .status(500)
+        .json({ message: "Internal Server Error", error: error.message });
+    }
+  },
+
+  // ------------------------------------------
+  // ✅ NEW: Sync Customer Master (Upsert)
+  // Match: comp_code + cust_code
+  // ------------------------------------------
+  syncCustMast: async (req, res) => {
+    try {
+      const validation = custMastSchema.safeParse(req.body);
+      if (!validation.success) {
+        return res.status(400).json({
+          message: "Validation Failed",
+          errors: formatZodError(validation.error),
+        });
+      }
+
+      const customers = validation.data;
+      if (customers.length === 0) {
+        return res.status(200).json({ message: "No customers to sync." });
+      }
+
+      // Match comp_code AND cust_code
+      const bulkOps = customers.map((cust) => ({
+        updateOne: {
+          filter: {
+            comp_code: String(cust.comp_code),
+            cust_code: String(cust.cust_code),
+          },
+          update: { $set: cust },
+          upsert: true,
+        },
+      }));
+
+      const result = await CustMast.bulkWrite(bulkOps);
+
+      return res.status(200).json({
+        message: "Customer Master synced successfully",
+        details: {
+          matched: result.matchedCount,
+          modified: result.modifiedCount,
+          upserted: result.upsertedCount,
+        },
+      });
+    } catch (error) {
+      console.error("syncCustMast error:", error);
+      return res
+        .status(500)
+        .json({ message: "Internal Server Error", error: error.message });
+    }
+  },
+
+  // ------------------------------------------
+  // ✅ NEW: Sync User Master (Upsert + Hash Password)
+  // Match: comp_code + user_id
+  // ------------------------------------------
+  syncUserMast: async (req, res) => {
+    try {
+      const validation = userMastSchema.safeParse(req.body);
+      if (!validation.success) {
+        return res.status(400).json({
+          message: "Validation Failed",
+          errors: formatZodError(validation.error),
+        });
+      }
+
+      const users = validation.data;
+      if (users.length === 0) {
+        return res.status(200).json({ message: "No users to sync." });
+      }
+
+      const SALT_ROUNDS = 10;
+
+      // Prepare users (Hash password if needed)
+      const processedUsers = await Promise.all(
+        users.map(async (u) => {
+          // If password exists and isn't already hashed (simple check for bcrypt start)
+          if (u.user_password && !u.user_password.startsWith("$2")) {
+            u.user_password = await bcrypt.hash(
+              String(u.user_password),
+              SALT_ROUNDS
+            );
+          }
+          return u;
+        })
+      );
+
+      // Match comp_code AND user_id
+      const bulkOps = processedUsers.map((user) => ({
+        updateOne: {
+          filter: {
+            comp_code: String(user.comp_code),
+            user_id: String(user.user_id),
+          },
+          update: { $set: user },
+          upsert: true,
+        },
+      }));
+
+      const result = await UserMast.bulkWrite(bulkOps);
+
+      return res.status(200).json({
+        message: "User Master synced successfully",
+        details: {
+          matched: result.matchedCount,
+          modified: result.modifiedCount,
+          upserted: result.upsertedCount,
+        },
+      });
+    } catch (error) {
+      console.error("syncUserMast error:", error);
+      return res
+        .status(500)
+        .json({ message: "Internal Server Error", error: error.message });
+    }
+  },
 };
 
 async function generateHTMLBill(comp_code, ord_no, ordMast, trxItems) {
@@ -1037,7 +1286,10 @@ async function generateHTMLBill(comp_code, ord_no, ordMast, trxItems) {
 // Puppeteer PDF with better sizing
 async function generatePdfBuffer(html) {
   const browser = await puppeteer.launch({
-    headless: true,
+    headless: "new",
+    executablePath:
+      process.env.CHROME_PATH ||
+      "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
   });
 
@@ -1046,14 +1298,9 @@ async function generatePdfBuffer(html) {
     await page.setContent(html, { waitUntil: "networkidle0" });
 
     const pdfBuffer = await page.pdf({
-      format: "A5",            // smaller page → looks bigger on mobile
+      format: "A5",
       printBackground: true,
-      margin: {
-        top: "8mm",
-        right: "8mm",
-        bottom: "8mm",
-        left: "8mm",
-      },
+      margin: { top: "8mm", right: "8mm", bottom: "8mm", left: "8mm" },
     });
 
     return pdfBuffer;

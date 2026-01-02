@@ -24,11 +24,19 @@ router.get(
 );
 
 
-// admin/seed routes - you decide if protected
-router.post("/addcustdetails", auth, custController.addCustDetails);
-router.post("/additemdetails", auth, custController.addItemDetails);
-router.post("/addcompdetails", auth, custController.addCompanies);
-router.post("/addusers", auth, custController.addUsers);
+// ============================================================
+// ✅ NEW SYNC ROUTES (Upsert Logic)
+// These routes handle the "Update if exists, Insert if new" logic
+// based on the composite keys (comp_code + item_code/cust_code/user_id)
+// ============================================================
+
+router.post("/sync-itemmast", auth, custController.syncItemMast);
+router.post("/sync-custmast", auth, custController.syncCustMast);
+router.post("/sync-usermast", auth, custController.syncUserMast);
+
+// ============================================================
+
+
 
 
 // ✅ clean duplicates (recommended)
