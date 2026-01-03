@@ -1095,6 +1095,90 @@ const custController = {
         .json({ message: "Internal Server Error", error: error.message });
     }
   },
+
+  // ------------------------------------------
+  // ✅ Get All Pending Orders (Status = "N")
+  // ------------------------------------------
+  getPendingOrders: async (req, res) => {
+    try {
+      const comp_code = req.comp_code; // From auth middleware
+
+      // Find orders matching comp_code AND status_flag "N"
+      const pendingOrders = await OrdMast.find({
+        comp_code: String(comp_code),
+        status_flag: "N",
+      }).sort({ ord_date: -1, ord_no: -1 }); // Sort by latest date/order number
+
+      if (pendingOrders.length === 0) {
+        return res.status(200).json({ message: "No pending orders found", data: [] });
+      }
+
+      return res.status(200).json({
+        message: "Pending orders fetched successfully",
+        count: pendingOrders.length,
+        data: pendingOrders,
+      });
+    } catch (error) {
+      console.error("getPendingOrders error:", error);
+      return res.status(500).json({
+        message: "Internal server error",
+        error: error.message,
+      });
+    }
+  },
+
+  // ------------------------------------------
+  // ✅ Update Order Status Flag
+  // Matches: comp_code (from token) + ord_no (from body)
+  // ------------------------------------------
+  updateOrderStatus: async (req, res) => {
+    try {
+      const comp_code = req.comp_code; // From auth middleware
+      const { ord_no, status_flag } = req.body;
+
+      // 1. Validation
+      if (!ord_no) {
+        return res.status(400).json({ message: "ord_no is required" });
+      }
+      if (!status_flag) {
+        return res.status(400).json({ message: "status_flag is required" });
+      }
+
+      // 2. Find and Update
+      // We search by comp_code AND ord_no to ensure tenancy security
+      const updatedOrder = await OrdMast.findOneAndUpdate(
+        {
+          comp_code: String(comp_code),
+          ord_no: Number(ord_no)
+        },
+        {
+          $set: { status_flag: String(status_flag) }
+        },
+        { new: true } // Return the updated document
+      );
+
+      if (!updatedOrder) {
+        return res.status(404).json({
+          message: `Order #${ord_no} not found for this company.`
+        });
+      }
+
+      return res.status(200).json({
+        message: "Order status updated successfully",
+        data: {
+          ord_no: updatedOrder.ord_no,
+          new_status: updatedOrder.status_flag
+        }
+      });
+
+    } catch (error) {
+      console.error("updateOrderStatus error:", error);
+      return res.status(500).json({
+        message: "Internal server error",
+        error: error.message,
+      });
+    }
+  },
 };
 
 async function generateHTMLBill(comp_code, ord_no, ordMast, trxItems) {

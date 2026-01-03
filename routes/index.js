@@ -36,8 +36,10 @@ router.post("/sync-usermast", auth, custController.syncUserMast);
 
 // ============================================================
 
-
-
+// ✅ Get Pending Orders
+router.get("/pending-orders", auth, custController.getPendingOrders);
+// ✅ Update Order Status
+router.post("/update-order-status", auth, custController.updateOrderStatus);
 
 // ✅ clean duplicates (recommended)
 router.post("/deletecompmast", custController.deleteCompMast);
