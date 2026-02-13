@@ -1368,28 +1368,62 @@ async function generateHTMLBill(comp_code, ord_no, ordMast, trxItems) {
 }
 
 // Puppeteer PDF with better sizing
+// async function generatePdfBuffer(html) {
+//   const browser = await puppeteer.launch({
+//     headless: "new",
+//     executablePath:
+//       process.env.CHROME_PATH ||
+//       "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+//     args: ["--no-sandbox", "--disable-setuid-sandbox"],
+//   });
+
+//   try {
+//     const page = await browser.newPage();
+//     await page.setContent(html, { waitUntil: "networkidle0" });
+
+//     const pdfBuffer = await page.pdf({
+//       format: "A5",
+//       printBackground: true,
+//       margin: { top: "8mm", right: "8mm", bottom: "8mm", left: "8mm" },
+//     });
+
+//     return pdfBuffer;
+//   } finally {
+//     await browser.close();
+//   }
+// }
+
 async function generatePdfBuffer(html) {
+  const executablePath =
+    process.env.PUPPETEER_EXECUTABLE_PATH ||
+    process.env.CHROME_PATH ||
+    "/snap/bin/chromium"; // fallback
+
   const browser = await puppeteer.launch({
     headless: "new",
-    executablePath:
-      process.env.CHROME_PATH ||
-      "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    executablePath,
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--no-zygote",
+      "--single-process",
+    ],
   });
 
   try {
     const page = await browser.newPage();
     await page.setContent(html, { waitUntil: "networkidle0" });
 
-    const pdfBuffer = await page.pdf({
+    return await page.pdf({
       format: "A5",
       printBackground: true,
       margin: { top: "8mm", right: "8mm", bottom: "8mm", left: "8mm" },
     });
-
-    return pdfBuffer;
   } finally {
     await browser.close();
   }
 }
+
 export default custController;
