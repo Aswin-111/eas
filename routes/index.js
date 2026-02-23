@@ -45,4 +45,7 @@ router.post("/update-order-status", auth, custController.updateOrderStatus);
 router.post("/deletecompmast", custController.deleteCompMast);
 router.post("/deleteitemmast", custController.deleteItemMast);
 
+// ✅ VB6 Pull Endpoints (Mongo -> JSON)
+router.get("/pull-ordermast", auth, custController.pullOrderMast);
+router.get("/pull-ordertrxfile", auth, custController.pullOrderTrxfile);
 export default router;

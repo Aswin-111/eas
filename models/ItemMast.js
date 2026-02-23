@@ -10,7 +10,7 @@ const itemMastSchema = new mongoose.Schema(
     item_price2: { type: Number },
     item_price3: { type: Number },
     item_price4: { type: Number },
-    item_price5: { type: Number },
+    item_price5: { type: Number },  
     item_mrp: { type: Number },
     item_cost: { type: Number },
     item_netcost: { type: Number },
