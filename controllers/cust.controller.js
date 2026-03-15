@@ -1181,27 +1181,25 @@ const custController = {
   },
   pullOrderMast: async (req, res) => {
     try {
-      const comp_code = String(req.comp_code).trim();
+      const comp_code = String(req.query.comp_code || req.comp_code || "").trim();
+      if (!comp_code) {
+        return res.status(400).json({ message: "comp_code missing" });
+      }
+
       const limitNum = Math.min(Number(req.query.limit || 1000), 5000);
 
-      // cursor options
       const last_id = req.query.last_id ? String(req.query.last_id).trim() : null;
-      const updated_since = req.query.updated_since
-        ? String(req.query.updated_since).trim()
-        : null; // ISO date string preferred
+      const updated_since = req.query.updated_since ? String(req.query.updated_since).trim() : null;
 
       const q = { comp_code };
 
-      // Mode A: incremental by updatedAt (recommended)
       if (updated_since) {
         const dt = new Date(updated_since);
         if (Number.isNaN(dt.getTime())) {
           return res.status(400).json({ message: "updated_since must be a valid date/ISO string" });
         }
         q.updatedAt = { $gt: dt };
-      }
-      // Mode B: paging by _id (good for first full sync)
-      else if (last_id) {
+      } else if (last_id) {
         if (!mongoose.Types.ObjectId.isValid(last_id)) {
           return res.status(400).json({ message: "last_id must be a valid ObjectId" });
         }
@@ -1216,7 +1214,7 @@ const custController = {
       return res.status(200).json({
         data: docs,
         next_last_id: docs.length ? String(docs[docs.length - 1]._id) : "",
-        next_updated_since: docs.length ? docs[docs.length - 1].updatedAt : updated_since || "",
+        next_updated_since: docs.length ? docs[docs.length - 1].updatedAt : (updated_since || ""),
         count: docs.length,
       });
     } catch (error) {
