@@ -94,49 +94,43 @@ async function getLatestCustNumber(comp_code) {
 
   return result.length ? result[0].cust_num : 0;
 }
+
+const toNum = (v, d = 0) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : d;
+};
 const custController = {
   getAllCust: async (req, res) => {
     try {
-      const comp_code = req.comp_code; // from token
-      console.log("comp_code from token:", comp_code, typeof comp_code);
+      const comp_code = req.comp_code;
 
-      const pageNum = Number(req.query.page || 1);
-      const limitNum = Number(req.query.limit || 10);
+      const pageNum = Math.max(Number(req.query.page || 1), 1);
+      const limitNum = Math.max(Number(req.query.limit || 10), 1);
       const skip = (pageNum - 1) * limitNum;
+      const area = req.query.area?.trim();
 
-      const area = req.query.area;
-
-      // Build comp_code variants safely
-      const compStr = String(comp_code);
+      const compStr = String(comp_code).trim();
       const compNum = Number(comp_code);
-      const compVariants = Number.isNaN(compNum) ? [compStr] : [compStr, compNum];
+
+      const compVariants = Number.isNaN(compNum)
+        ? [compStr]
+        : [compStr, String(compNum)];
 
       const query = {
         comp_code: { $in: compVariants },
         ...(area ? { cust_area: area } : {}),
       };
 
-      // 🔍 DEBUG: verify data exists in the same collection
       const totalMatching = await CustMast.countDocuments(query);
-      const totalAll = await CustMast.countDocuments({});
-      const sampleAny = await CustMast.findOne({});
-      const sampleForComp = await CustMast.findOne({ comp_code: { $in: compVariants } });
 
-      console.log("DEBUG query:", query);
-      console.log("DEBUG totalAll:", totalAll);
-      console.log("DEBUG totalMatching:", totalMatching);
-      console.log("DEBUG sampleAny:", sampleAny?.comp_code, typeof sampleAny?.comp_code);
-      console.log("DEBUG sampleForComp:", sampleForComp?.comp_code, typeof sampleForComp?.comp_code);
+      const customers = await CustMast.find(query)
+        .collation({ locale: "en", strength: 2 }) // case-insensitive alphabetical sort
+        .sort({ cust_name: 1 }) // shop name alphabetical order
+        .skip(skip)
+        .limit(limitNum)
+        .lean();
 
-      const customers = await CustMast.find(query).sort({ createdAt: -1 }).skip(skip).limit(limitNum);
-      console.log(customers)
-      if (customers.length === 0) {
-        return res.status(404).json({ message: "No customers found" });
-      }
-
-      const areas = await CustMast.distinct("cust_area", {
-        comp_code: { $in: compVariants },
-      });
+      const areas = await CustMast.distinct("cust_area", query);
 
       return res.status(200).json({
         users: customers.map((customer) => ({
@@ -144,13 +138,16 @@ const custController = {
           cust_name: customer.cust_name,
           cust_phone: customer.cust_phone || "N/A",
           cust_address: customer.cust_address || "N/A",
-          cust_area: customer.cust_area,
-          cust_type: customer.cust_type,
-          cust_gst: customer.cust_gst,
-          old_bal: customer.Old_bal,
+          cust_area: customer.cust_area || "N/A",
+          cust_type: customer.cust_type || "R",
+          cust_gst: customer.cust_gst || "N/A",
+          old_bal: customer.Old_bal ?? 0,
         })),
-        areas,
+        areas: areas.filter(Boolean).sort((a, b) => a.localeCompare(b)),
         total: totalMatching,
+        page: pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(totalMatching / limitNum),
       });
     } catch (error) {
       console.error("getAllCust error:", error);
@@ -175,7 +172,7 @@ const custController = {
       if (shopDetails.length > 0) {
         return res.status(200).json(shopDetails);
       } else {
-        return res.status(400).json({ message: "Shops data not found!" });
+        return res.status(200).json([]);
       }
     } catch (error) {
       res
@@ -469,74 +466,33 @@ const custController = {
         matchQuery.status_flag = { $in: statuses };
       }
 
-      /* ===============================
-         1️⃣ PAGINATED DATA WITH CUSTOMER NAME
-         =============================== */
       const orders = await OrdMast.aggregate([
         { $match: matchQuery },
 
         {
-          $lookup: {
-            from: "custmasts",
-            let: {
-              compCode: "$comp_code",
-              actCode: "$act_code"
-            },
-            pipeline: [
-              {
-                $addFields: {
-                  cust_code_num: {
-                    $toInt: {
-                      $getField: {
-                        field: "match",
-                        input: {
-                          $regexFind: { input: "$cust_code", regex: /^[0-9]+/ },
-                        },
-                      },
-                    },
-                  },
-                },
-              },
-              {
-                $match: {
-                  $expr: {
-                    $and: [
-                      { $eq: ["$comp_code", "$$compCode"] },
-                      { $eq: ["$cust_code_num", { $add: [1000, { $toInt: "$$actCode" }] }] }
-                    ],
-                  },
-                },
-              },
-              { $project: { cust_name: 1, _id: 0 } },
-            ],
-            as: "customer",
-          },
-        }
-        ,
-
-        {
           $addFields: {
             cust_name: {
-              $ifNull: [{ $arrayElemAt: ["$customer.cust_name", 0] }, "-"],
-            },
-          },
+              $cond: [
+                {
+                  $and: [
+                    { $ne: ["$act_name", null] },
+                    { $ne: [{ $trim: { input: "$act_name" } }, ""] }
+                  ]
+                },
+                "$act_name",
+                "-"
+              ]
+            }
+          }
         },
-
-        { $project: { customer: 0 } },
 
         { $sort: { createdAt: -1 } },
         { $skip: skip },
         { $limit: limitNum },
       ]);
 
-      /* ===============================
-         2️⃣ TOTAL COUNT
-         =============================== */
       const total = await OrdMast.countDocuments(matchQuery);
 
-      /* ===============================
-         3️⃣ SUBTOTAL OF FILTERED DATA
-         =============================== */
       const totalsAgg = await OrdMast.aggregate([
         { $match: matchQuery },
         {
@@ -584,7 +540,7 @@ const custController = {
   getOrderDetails: async (req, res) => {
     try {
       const comp_code = String(req.comp_code).trim();
-      const user_code = String(req.user?.user_id || "").trim(); // optional validation
+      const user_code = String(req.user?.user_id || "").trim();
       const ord_no = Number(req.params.ord_no);
 
       if (!comp_code || !ord_no) {
@@ -593,11 +549,11 @@ const custController = {
         });
       }
 
-      // 1️⃣ Fetch Order Master
+      // 1) Fetch Order Master
       const order = await OrdMast.findOne({
         comp_code,
         ord_no,
-        user_code, // 🔒 ensures user can only view their own orders
+        user_code,
       }).lean();
 
       if (!order) {
@@ -606,7 +562,7 @@ const custController = {
         });
       }
 
-      // 2️⃣ Fetch Order Line Items
+      // 2) Fetch Order Line Items
       const items = await OrdTrxfile.find({
         comp_code,
         ord_no,
@@ -614,7 +570,46 @@ const custController = {
         .sort({ line_no: 1 })
         .lean();
 
-      // 3️⃣ Calculate totals from items (safe recalculation)
+      // 3) Build customer data from order first
+      let customerData = {
+        code: order.act_code || "",
+        name: order.act_name || "",
+        phone: order.act_phone || "",
+        address: order.act_address || "",
+        area: order.act_area || "",
+      };
+
+      // 4) Fallback to customer master if order customer fields are empty
+      const hasMissingCustomerDetails =
+        !customerData.name &&
+        !customerData.phone &&
+        !customerData.address &&
+        !!customerData.code;
+
+      if (hasMissingCustomerDetails) {
+        const actCodeNum = Number(order.act_code);
+
+        if (!Number.isNaN(actCodeNum)) {
+          const fallbackCustCode = String(1000 + actCodeNum);
+
+          const cust = await CustMast.findOne({
+            comp_code,
+            cust_code: fallbackCustCode,
+          }).lean();
+
+          if (cust) {
+            customerData = {
+              code: order.act_code || "",
+              name: cust.cust_name || "",
+              phone: cust.cust_phone || "",
+              address: cust.cust_address || "",
+              area: cust.cust_area || "",
+            };
+          }
+        }
+      }
+
+      // 5) Calculate totals from items
       const summary = items.reduce(
         (acc, item) => {
           acc.total_qty += Number(item.item_qty || 0);
@@ -637,18 +632,10 @@ const custController = {
           ord_date: order.ord_date,
           ord_time: order.ord_time,
           status: order.status_flag === "Y" ? "BILLED" : "PENDING",
-
-          customer: {
-            code: order.act_code,
-            name: order.act_name,
-            phone: order.act_phone,
-            address: order.act_address,
-            area: order.act_area,
-          },
-
+          customer: customerData,
           totals: {
-            trx_total: order.trx_total,
-            trx_netamount: order.trx_netamount,
+            trx_total: order.trx_total || 0,
+            trx_netamount: order.trx_netamount || 0,
           },
         },
 
@@ -665,7 +652,7 @@ const custController = {
           total: item.trx_total,
         })),
 
-        computed_summary: summary, // recalculated from line items
+        computed_summary: summary,
       });
     } catch (error) {
       console.error("getOrderDetails error:", error);
@@ -1189,14 +1176,18 @@ const custController = {
       const limitNum = Math.min(Number(req.query.limit || 1000), 5000);
 
       const last_id = req.query.last_id ? String(req.query.last_id).trim() : null;
-      const updated_since = req.query.updated_since ? String(req.query.updated_since).trim() : null;
+      const updated_since = req.query.updated_since
+        ? String(req.query.updated_since).trim()
+        : null;
 
       const q = { comp_code };
 
       if (updated_since) {
         const dt = new Date(updated_since);
         if (Number.isNaN(dt.getTime())) {
-          return res.status(400).json({ message: "updated_since must be a valid date/ISO string" });
+          return res
+            .status(400)
+            .json({ message: "updated_since must be a valid date/ISO string" });
         }
         q.updatedAt = { $gt: dt };
       } else if (last_id) {
@@ -1211,61 +1202,314 @@ const custController = {
         .limit(limitNum)
         .lean();
 
+      if (!docs.length) {
+        return res.status(200).json({
+          data: [],
+          next_last_id: "",
+          next_updated_since: updated_since || "",
+          count: 0,
+        });
+      }
+
+      const ordNos = [...new Set(docs.map((d) => d.ord_no))];
+
+      const trxDocs = await OrdTrxfile.find({
+        comp_code,
+        ord_no: { $in: ordNos },
+      }).lean();
+
+      const trxMap = new Map();
+      for (const trx of trxDocs) {
+        const key = `${trx.comp_code}__${trx.ord_no}`;
+        if (!trxMap.has(key)) trxMap.set(key, []);
+        trxMap.get(key).push(trx);
+      }
+
+      const enrichedDocs = docs.map((doc) => {
+        const key = `${doc.comp_code}__${doc.ord_no}`;
+        return {
+          ...doc,
+          trx_files: trxMap.get(key) || [],
+        };
+      });
+
       return res.status(200).json({
-        data: docs,
+        data: enrichedDocs,
         next_last_id: docs.length ? String(docs[docs.length - 1]._id) : "",
-        next_updated_since: docs.length ? docs[docs.length - 1].updatedAt : (updated_since || ""),
-        count: docs.length,
+        next_updated_since: docs.length
+          ? docs[docs.length - 1].updatedAt
+          : updated_since || "",
+        count: enrichedDocs.length,
       });
     } catch (error) {
       console.error("pullOrderMast error:", error);
-      return res.status(500).json({ message: "Internal server error", error: error.message });
+      return res
+        .status(500)
+        .json({ message: "Internal server error", error: error.message });
     }
   },
 
- pullOrderTrxfile: async (req, res) => {
-  try {
-    const comp_code = String(req.query.comp_code || req.comp_code || "").trim();
-    if (!comp_code) {
-      return res.status(400).json({ message: "comp_code missing" });
-    }
-
-    const limitNum = Math.min(Number(req.query.limit || 2000), 10000);
-
-    const last_id = req.query.last_id ? String(req.query.last_id).trim() : null;
-    const updated_since = req.query.updated_since ? String(req.query.updated_since).trim() : null;
-
-    const q = { comp_code };
-
-    if (updated_since) {
-      const dt = new Date(updated_since);
-      if (Number.isNaN(dt.getTime())) {
-        return res.status(400).json({ message: "updated_since must be a valid date/ISO string" });
+  pullOrderTrxfile: async (req, res) => {
+    try {
+      const comp_code = String(req.query.comp_code || req.comp_code || "").trim();
+      if (!comp_code) {
+        return res.status(400).json({ message: "comp_code missing" });
       }
-      q.updatedAt = { $gt: dt };
-    } else if (last_id) {
-      if (!mongoose.Types.ObjectId.isValid(last_id)) {
-        return res.status(400).json({ message: "last_id must be a valid ObjectId" });
+
+      const limitNum = Math.min(Number(req.query.limit || 2000), 10000);
+
+      const last_id = req.query.last_id ? String(req.query.last_id).trim() : null;
+      const updated_since = req.query.updated_since
+        ? String(req.query.updated_since).trim()
+        : null;
+
+      const q = { comp_code };
+
+      if (updated_since) {
+        const dt = new Date(updated_since);
+        if (Number.isNaN(dt.getTime())) {
+          return res
+            .status(400)
+            .json({ message: "updated_since must be a valid date/ISO string" });
+        }
+        q.updatedAt = { $gt: dt };
+      } else if (last_id) {
+        if (!mongoose.Types.ObjectId.isValid(last_id)) {
+          return res.status(400).json({ message: "last_id must be a valid ObjectId" });
+        }
+        q._id = { $gt: new mongoose.Types.ObjectId(last_id) };
       }
-      q._id = { $gt: new mongoose.Types.ObjectId(last_id) };
+
+      const docs = await OrdTrxfile.find(q)
+        .sort(updated_since ? { updatedAt: 1, _id: 1 } : { _id: 1 })
+        .limit(limitNum)
+        .lean();
+
+      if (!docs.length) {
+        return res.status(200).json({
+          data: [],
+          next_last_id: "",
+          next_updated_since: updated_since || "",
+          count: 0,
+        });
+      }
+
+      const ordNos = [...new Set(docs.map((d) => d.ord_no))];
+
+      const mastDocs = await OrdMast.find({
+        comp_code,
+        ord_no: { $in: ordNos },
+      }).lean();
+
+      const mastMap = new Map();
+      for (const mast of mastDocs) {
+        const key = `${mast.comp_code}__${mast.ord_no}`;
+        mastMap.set(key, mast);
+      }
+
+      const enrichedDocs = docs.map((doc) => {
+        const key = `${doc.comp_code}__${doc.ord_no}`;
+        return {
+          ...doc,
+          order_mast: mastMap.get(key) || null,
+        };
+      });
+
+      return res.status(200).json({
+        data: enrichedDocs,
+        next_last_id: docs.length ? String(docs[docs.length - 1]._id) : "",
+        next_updated_since: docs.length
+          ? docs[docs.length - 1].updatedAt
+          : updated_since || "",
+        count: enrichedDocs.length,
+      });
+    } catch (error) {
+      console.error("pullOrderTrxfile error:", error);
+      return res
+        .status(500)
+        .json({ message: "Internal server error", error: error.message });
     }
+  },
 
-    const docs = await OrdTrxfile.find(q)
-      .sort(updated_since ? { updatedAt: 1, _id: 1 } : { _id: 1 })
-      .limit(limitNum)
-      .lean();
+  updateOrderDetails: async (req, res) => {
+    const session = await mongoose.startSession();
 
-    return res.status(200).json({
-      data: docs,
-      next_last_id: docs.length ? String(docs[docs.length - 1]._id) : "",
-      next_updated_since: docs.length ? docs[docs.length - 1].updatedAt : (updated_since || ""),
-      count: docs.length,
-    });
-  } catch (error) {
-    console.error("pullOrderTrxfile error:", error);
-    return res.status(500).json({ message: "Internal server error", error: error.message });
+    try {
+      const comp_code = String(req.comp_code).trim();
+      const user_code = String(req.user?.user_id || "").trim();
+      const ord_no = Number(req.params.ord_no);
+
+      if (!comp_code || !user_code || !ord_no) {
+        return res.status(400).json({ message: "Invalid request context" });
+      }
+
+      const {
+        customer,
+        items,
+        ord_date,
+        ord_time,
+        status_flag,
+      } = req.body || {};
+
+      if (!Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({ message: "At least one item is required" });
+      }
+
+      const existingOrder = await OrdMast.findOne({
+        comp_code,
+        ord_no,
+        user_code,
+      });
+
+      if (!existingOrder) {
+        return res.status(404).json({ message: "Order not found" });
+      }
+
+      const normalizedItems = items.map((item, index) => {
+        const qty = toNum(item.qty, 0);
+        const price = toNum(item.price, 0);
+        const mrp = toNum(item.mrp, 0);
+        const tax = toNum(item.tax, 0);
+        const discount = toNum(item.discount, 0);
+        const cess = toNum(item.cess, 0);
+
+        const discountedBase = price - (price * discount) / 100;
+        const lineTax = (discountedBase * tax) / 100;
+        const lineCess = (discountedBase * cess) / 100;
+        const lineTotal = round2((discountedBase + lineTax + lineCess) * qty);
+
+        return {
+          line_no: index + 1,
+          item_code: String(item.item_code || "").trim(),
+          item_name: String(item.item_name || "").trim(),
+          item_qty: qty,
+          item_mrp: mrp,
+          item_price: price,
+          item_tax: tax,
+          item_disc: discount,
+          item_cess: cess,
+          trx_total: lineTotal,
+        };
+      });
+
+      const trx_total = round2(
+        normalizedItems.reduce((sum, item) => sum + item.trx_total, 0)
+      );
+      const trx_netamount = trx_total;
+      const trx_disc = round2(
+        normalizedItems.reduce(
+          (sum, item) => sum + ((item.item_price * item.item_disc) / 100) * item.item_qty,
+          0
+        )
+      );
+
+      await session.withTransaction(async () => {
+        await OrdMast.updateOne(
+          { comp_code, ord_no, user_code },
+          {
+            $set: {
+              ord_date: ord_date || existingOrder.ord_date,
+              ord_time: ord_time || existingOrder.ord_time,
+              act_code: customer?.code ?? existingOrder.act_code,
+              act_name: customer?.name ?? existingOrder.act_name,
+              act_phone: customer?.phone ?? existingOrder.act_phone,
+              act_address: customer?.address ?? existingOrder.act_address,
+              act_area: customer?.area ?? existingOrder.act_area,
+              act_type: customer?.type ?? existingOrder.act_type,
+              status_flag: status_flag ?? existingOrder.status_flag,
+              trx_disc,
+              trx_total,
+              trx_netamount,
+            },
+          },
+          { session }
+        );
+
+        await OrdTrxfile.deleteMany({ comp_code, ord_no }, { session });
+
+        if (normalizedItems.length > 0) {
+          await OrdTrxfile.insertMany(
+            normalizedItems.map((item) => ({
+              comp_code,
+              ord_no,
+              ord_date: ord_date || existingOrder.ord_date,
+              line_no: item.line_no,
+              item_code: item.item_code,
+              item_name: item.item_name,
+              item_qty: item.item_qty,
+              item_mrp: item.item_mrp,
+              item_price: item.item_price,
+              item_tax: item.item_tax,
+              item_disc: item.item_disc,
+              item_cess: item.item_cess,
+              trx_total: item.trx_total,
+              status_flag: status_flag ?? existingOrder.status_flag,
+            })),
+            { session }
+          );
+        }
+      });
+
+      return res.status(200).json({
+        message: "Order updated successfully",
+        order: {
+          ord_no,
+          trx_total,
+          trx_netamount,
+          item_count: normalizedItems.length,
+        },
+      });
+    } catch (error) {
+      console.error("updateOrderDetails error:", error);
+      return res.status(500).json({
+        message: "Internal server error",
+        error: error.message,
+      });
+    } finally {
+      session.endSession();
+    }
+  },
+  deleteOrder: async (req, res) => {
+    const session = await mongoose.startSession();
+
+    try {
+      const comp_code = String(req.comp_code).trim();
+      const user_code = String(req.user?.user_id || "").trim();
+      const ord_no = Number(req.params.ord_no);
+
+      if (!comp_code || !user_code || !ord_no) {
+        return res.status(400).json({ message: "Invalid request context" });
+      }
+
+      const existingOrder = await OrdMast.findOne({
+        comp_code,
+        ord_no,
+        user_code,
+      });
+
+      if (!existingOrder) {
+        return res.status(404).json({ message: "Order not found" });
+      }
+
+      await session.withTransaction(async () => {
+        await OrdTrxfile.deleteMany({ comp_code, ord_no }, { session });
+        await OrdMast.deleteOne({ comp_code, ord_no, user_code }, { session });
+      });
+
+      return res.status(200).json({
+        message: "Order deleted successfully",
+        ord_no,
+      });
+    } catch (error) {
+      console.error("deleteOrder error:", error);
+      return res.status(500).json({
+        message: "Internal server error",
+        error: error.message,
+      });
+    } finally {
+      session.endSession();
+    }
   }
-},
 
 };
 

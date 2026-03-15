@@ -3,8 +3,8 @@ import mongoose from "mongoose";
 
 const custMastSchema = new mongoose.Schema(
   {
-    comp_code: { type: String, required: true }, // was Number -> make consistent with rest
-    cust_code: { type: String, required: true }, // was Number -> MUST be String for "*"
+    comp_code: { type: String, required: true },
+    cust_code: { type: String, required: true },
     cust_name: { type: String, required: true },
     cust_address: { type: String },
     cust_phone: { type: String },
@@ -19,6 +19,7 @@ const custMastSchema = new mongoose.Schema(
 );
 
 custMastSchema.index({ comp_code: 1, cust_code: 1 }, { unique: true });
+custMastSchema.index({ comp_code: 1, cust_name: 1 }); // for alphabetical listing
 
 const CustMast = mongoose.model("CustMast", custMastSchema);
 

@@ -22,7 +22,8 @@ router.get(
   auth,
   custController.getOrderDetails
 );
-
+router.put("/orders/:ord_no", auth, custController.updateOrderDetails);
+router.delete("/orders/:ord_no", auth, custController.deleteOrder);
 
 // ============================================================
 // ✅ NEW SYNC ROUTES (Upsert Logic)
