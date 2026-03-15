@@ -1223,47 +1223,50 @@ const custController = {
     }
   },
 
-  pullOrderTrxfile: async (req, res) => {
-    try {
-      const comp_code = String(req.comp_code).trim();
-      const limitNum = Math.min(Number(req.query.limit || 2000), 10000);
-
-      const last_id = req.query.last_id ? String(req.query.last_id).trim() : null;
-      const updated_since = req.query.updated_since
-        ? String(req.query.updated_since).trim()
-        : null;
-
-      const q = { comp_code };
-
-      if (updated_since) {
-        const dt = new Date(updated_since);
-        if (Number.isNaN(dt.getTime())) {
-          return res.status(400).json({ message: "updated_since must be a valid date/ISO string" });
-        }
-        q.updatedAt = { $gt: dt };
-      } else if (last_id) {
-        if (!mongoose.Types.ObjectId.isValid(last_id)) {
-          return res.status(400).json({ message: "last_id must be a valid ObjectId" });
-        }
-        q._id = { $gt: new mongoose.Types.ObjectId(last_id) };
-      }
-
-      const docs = await OrdTrxfile.find(q)
-        .sort(updated_since ? { updatedAt: 1, _id: 1 } : { _id: 1 })
-        .limit(limitNum)
-        .lean();
-
-      return res.status(200).json({
-        data: docs,
-        next_last_id: docs.length ? String(docs[docs.length - 1]._id) : "",
-        next_updated_since: docs.length ? docs[docs.length - 1].updatedAt : updated_since || "",
-        count: docs.length,
-      });
-    } catch (error) {
-      console.error("pullOrderTrxfile error:", error);
-      return res.status(500).json({ message: "Internal server error", error: error.message });
+ pullOrderTrxfile: async (req, res) => {
+  try {
+    const comp_code = String(req.query.comp_code || req.comp_code || "").trim();
+    if (!comp_code) {
+      return res.status(400).json({ message: "comp_code missing" });
     }
-  },
+
+    const limitNum = Math.min(Number(req.query.limit || 2000), 10000);
+
+    const last_id = req.query.last_id ? String(req.query.last_id).trim() : null;
+    const updated_since = req.query.updated_since ? String(req.query.updated_since).trim() : null;
+
+    const q = { comp_code };
+
+    if (updated_since) {
+      const dt = new Date(updated_since);
+      if (Number.isNaN(dt.getTime())) {
+        return res.status(400).json({ message: "updated_since must be a valid date/ISO string" });
+      }
+      q.updatedAt = { $gt: dt };
+    } else if (last_id) {
+      if (!mongoose.Types.ObjectId.isValid(last_id)) {
+        return res.status(400).json({ message: "last_id must be a valid ObjectId" });
+      }
+      q._id = { $gt: new mongoose.Types.ObjectId(last_id) };
+    }
+
+    const docs = await OrdTrxfile.find(q)
+      .sort(updated_since ? { updatedAt: 1, _id: 1 } : { _id: 1 })
+      .limit(limitNum)
+      .lean();
+
+    return res.status(200).json({
+      data: docs,
+      next_last_id: docs.length ? String(docs[docs.length - 1]._id) : "",
+      next_updated_since: docs.length ? docs[docs.length - 1].updatedAt : (updated_since || ""),
+      count: docs.length,
+    });
+  } catch (error) {
+    console.error("pullOrderTrxfile error:", error);
+    return res.status(500).json({ message: "Internal server error", error: error.message });
+  }
+},
+
 };
 
 async function generateHTMLBill(comp_code, ord_no, ordMast, trxItems) {
