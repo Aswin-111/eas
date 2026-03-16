@@ -418,15 +418,15 @@ const custController = {
   },
   getOrderReports: async (req, res) => {
     try {
-      const comp_code = String(req.comp_code).trim();
+      const comp_code = String(req.comp_code || "").trim();
       const user_code = String(req.user?.user_id || "").trim();
 
       if (!comp_code || !user_code) {
         return res.status(401).json({ message: "Invalid token context" });
       }
 
-      const pageNum = Number(req.query.page || 1);
-      const limitNum = Number(req.query.limit || 10);
+      const pageNum = Math.max(Number(req.query.page || 1), 1);
+      const limitNum = Math.max(Number(req.query.limit || 10), 1);
       const skip = (pageNum - 1) * limitNum;
 
       const from = req.query.from ? String(req.query.from).trim() : null;
@@ -437,6 +437,7 @@ const custController = {
       const billedFlag = String(req.query.billed || "").toLowerCase() === "true";
 
       let statuses = [];
+
       if (statusRaw) {
         statuses = statusRaw
           .split(",")
@@ -470,20 +471,102 @@ const custController = {
         { $match: matchQuery },
 
         {
+          $lookup: {
+            from: "custmasts",
+            let: {
+              compCode: "$comp_code",
+              actCode: { $toString: "$act_code" },
+            },
+            pipeline: [
+              {
+                $match: {
+                  $expr: {
+                    $and: [
+                      { $eq: ["$comp_code", "$$compCode"] },
+                      { $eq: [{ $toString: "$cust_code" }, "$$actCode"] },
+                    ],
+                  },
+                },
+              },
+              {
+                $project: {
+                  _id: 0,
+                  cust_name: 1,
+                  cust_phone: 1,
+                  cust_address: 1,
+                  cust_area: 1,
+                  cust_type: 1,
+                },
+              },
+            ],
+            as: "customer",
+          },
+        },
+
+        {
           $addFields: {
             cust_name: {
-              $cond: [
-                {
-                  $and: [
-                    { $ne: ["$act_name", null] },
-                    { $ne: [{ $trim: { input: "$act_name" } }, ""] }
-                  ]
+              $let: {
+                vars: {
+                  lookupName: { $arrayElemAt: ["$customer.cust_name", 0] },
+                  orderName: "$act_name",
                 },
-                "$act_name",
-                "-"
-              ]
-            }
-          }
+                in: {
+                  $cond: [
+                    {
+                      $and: [
+                        { $ne: ["$$lookupName", null] },
+                        { $ne: [{ $trim: { input: "$$lookupName" } }, ""] },
+                      ],
+                    },
+                    "$$lookupName",
+                    {
+                      $cond: [
+                        {
+                          $and: [
+                            { $ne: ["$$orderName", null] },
+                            { $ne: [{ $trim: { input: "$$orderName" } }, ""] },
+                          ],
+                        },
+                        "$$orderName",
+                        "-",
+                      ],
+                    },
+                  ],
+                },
+              },
+            },
+            cust_phone: {
+              $ifNull: [
+                { $arrayElemAt: ["$customer.cust_phone", 0] },
+                { $ifNull: ["$act_phone", ""] },
+              ],
+            },
+            cust_address: {
+              $ifNull: [
+                { $arrayElemAt: ["$customer.cust_address", 0] },
+                { $ifNull: ["$act_address", ""] },
+              ],
+            },
+            cust_area: {
+              $ifNull: [
+                { $arrayElemAt: ["$customer.cust_area", 0] },
+                { $ifNull: ["$act_area", ""] },
+              ],
+            },
+            cust_type: {
+              $ifNull: [
+                { $arrayElemAt: ["$customer.cust_type", 0] },
+                { $ifNull: ["$act_type", ""] },
+              ],
+            },
+          },
+        },
+
+        {
+          $project: {
+            customer: 0,
+          },
         },
 
         { $sort: { createdAt: -1 } },
@@ -511,7 +594,11 @@ const custController = {
           trx_netamount: totalsAgg[0].sum_trx_netamount,
           count: totalsAgg[0].count,
         }
-        : { trx_total: 0, trx_netamount: 0, count: 0 };
+        : {
+          trx_total: 0,
+          trx_netamount: 0,
+          count: 0,
+        };
 
       return res.status(200).json({
         filters: {
@@ -539,7 +626,7 @@ const custController = {
 
   getOrderDetails: async (req, res) => {
     try {
-      const comp_code = String(req.comp_code).trim();
+      const comp_code = String(req.comp_code || "").trim();
       const user_code = String(req.user?.user_id || "").trim();
       const ord_no = Number(req.params.ord_no);
 
@@ -549,7 +636,7 @@ const custController = {
         });
       }
 
-      // 1) Fetch Order Master
+      // 1) Fetch order master
       const order = await OrdMast.findOne({
         comp_code,
         ord_no,
@@ -562,7 +649,7 @@ const custController = {
         });
       }
 
-      // 2) Fetch Order Line Items
+      // 2) Fetch order line items
       const items = await OrdTrxfile.find({
         comp_code,
         ord_no,
@@ -577,39 +664,51 @@ const custController = {
         phone: order.act_phone || "",
         address: order.act_address || "",
         area: order.act_area || "",
+        type: order.act_type || "",
       };
 
-      // 4) Fallback to customer master if order customer fields are empty
+      // 4) If order does not store customer details, fallback to CustMast
       const hasMissingCustomerDetails =
-        !customerData.name &&
-        !customerData.phone &&
-        !customerData.address &&
-        !!customerData.code;
+        !String(customerData.name || "").trim() &&
+        !String(customerData.phone || "").trim() &&
+        !String(customerData.address || "").trim() &&
+        !!String(customerData.code || "").trim();
 
       if (hasMissingCustomerDetails) {
-        const actCodeNum = Number(order.act_code);
+        const rawActCode = String(order.act_code || "").trim();
 
-        if (!Number.isNaN(actCodeNum)) {
-          const fallbackCustCode = String(1000 + actCodeNum);
+        let cust = null;
 
-          const cust = await CustMast.findOne({
-            comp_code,
-            cust_code: fallbackCustCode,
-          }).lean();
+        // try direct code first: "1"
+        cust = await CustMast.findOne({
+          comp_code,
+          cust_code: rawActCode,
+        }).lean();
 
-          if (cust) {
-            customerData = {
-              code: order.act_code || "",
-              name: cust.cust_name || "",
-              phone: cust.cust_phone || "",
-              address: cust.cust_address || "",
-              area: cust.cust_area || "",
-            };
+        // optional fallback: if customer codes are stored like 1001, 1002...
+        if (!cust) {
+          const actCodeNum = Number(rawActCode);
+          if (!Number.isNaN(actCodeNum)) {
+            cust = await CustMast.findOne({
+              comp_code,
+              cust_code: String(1000 + actCodeNum),
+            }).lean();
           }
+        }
+
+        if (cust) {
+          customerData = {
+            code: rawActCode,
+            name: cust.cust_name || "",
+            phone: cust.cust_phone || "",
+            address: cust.cust_address || "",
+            area: cust.cust_area || "",
+            type: cust.cust_type || "",
+          };
         }
       }
 
-      // 5) Calculate totals from items
+      // 5) Recalculate summary from order items
       const summary = items.reduce(
         (acc, item) => {
           acc.total_qty += Number(item.item_qty || 0);
@@ -626,6 +725,7 @@ const custController = {
         }
       );
 
+      // 6) Return response
       return res.status(200).json({
         order: {
           ord_no: order.ord_no,
@@ -634,25 +734,30 @@ const custController = {
           status: order.status_flag === "Y" ? "BILLED" : "PENDING",
           customer: customerData,
           totals: {
-            trx_total: order.trx_total || 0,
-            trx_netamount: order.trx_netamount || 0,
+            trx_total: Number(order.trx_total || 0),
+            trx_netamount: Number(order.trx_netamount || 0),
           },
         },
 
         items: items.map((item) => ({
           line_no: item.line_no,
-          item_code: item.item_code,
-          item_name: item.item_name,
-          qty: item.item_qty,
-          mrp: item.item_mrp,
-          price: item.item_price,
-          tax: item.item_tax,
-          discount: item.item_disc,
-          cess: item.item_cess,
-          total: item.trx_total,
+          item_code: item.item_code || "",
+          item_name: item.item_name || "",
+          qty: Number(item.item_qty || 0),
+          mrp: Number(item.item_mrp || 0),
+          price: Number(item.item_price || 0),
+          tax: Number(item.item_tax || 0),
+          discount: Number(item.item_disc || 0),
+          cess: Number(item.item_cess || 0),
+          total: Number(item.trx_total || 0),
         })),
 
-        computed_summary: summary,
+        computed_summary: {
+          total_qty: Number(summary.total_qty || 0),
+          subtotal: Number(summary.subtotal || 0),
+          tax: Number(summary.tax || 0),
+          discount: Number(summary.discount || 0),
+        },
       });
     } catch (error) {
       console.error("getOrderDetails error:", error);
@@ -740,26 +845,55 @@ const custController = {
 
   orders: async (req, res) => {
     try {
-      const { order_details } = req.body;
-      const comp_code = req.comp_code;
-      const user_id = req.user?.user_id;
+      const { order_details, customer } = req.body;
+
+      const comp_code = String(req.comp_code || "").trim();
+      const user_id = String(req.user?.user_id || "").trim();
+
+      if (!comp_code || !user_id) {
+        return res.status(401).json({
+          message: "Invalid token context",
+        });
+      }
+
+      if (!Array.isArray(order_details) || order_details.length === 0) {
+        return res.status(400).json({
+          message: "order_details is required",
+        });
+      }
+
       const lastOrder = await OrdMast.findOne({ comp_code })
         .sort({ ord_no: -1 })
         .lean();
+
       const ord_no = lastOrder ? lastOrder.ord_no + 1 : 1;
+
       const totalAmount = order_details.reduce(
-        (sum, item) => sum + item.subtotal,
+        (sum, item) => sum + Number(item.subtotal || 0),
         0
       );
+
+      const today = new Date().toISOString().split("T")[0];
+      const nowTime = new Date().toTimeString().split(" ")[0];
 
       const ordMast = new OrdMast({
         comp_code,
         ord_no,
-        ord_date: new Date().toISOString().split("T")[0],
-        ord_time: new Date().toTimeString().split(" ")[0],
-        act_code: user_id,
+        ord_date: today,
+        ord_time: nowTime,
+
+        // customer details
+        act_code: String(customer?.code || "").trim(),
+        act_name: String(customer?.name || "").trim(),
+        act_phone: String(customer?.phone || "").trim(),
+        act_address: String(customer?.address || "").trim(),
+        act_area: String(customer?.area || "").trim(),
+        act_type: String(customer?.type || "").trim(),
+
         trx_total: totalAmount,
         trx_netamount: totalAmount,
+
+        // logged in app user
         user_code: user_id,
         status_flag: "N",
       });
@@ -770,14 +904,16 @@ const custController = {
             comp_code,
             ord_no,
             line_no: index + 1,
-            ord_date: new Date().toISOString().split("T")[0],
+            ord_date: today,
+            item_code: item.item_code,
             item_name: item.item_name,
-            item_qty: item.qty,
-            item_mrp: item.item_mrp,
-            item_price: item.item_price1,
-            item_tax: item.item_tax,
-            item_disc: item.discount,
-            trx_total: item.subtotal,
+            item_qty: Number(item.qty || 0),
+            item_mrp: Number(item.item_mrp ?? item.mrp ?? 0),
+            item_price: Number(item.item_price1 ?? item.price ?? 0),
+            item_tax: Number(item.item_tax ?? item.tax ?? 0),
+            item_disc: Number(item.item_disc ?? item.discount ?? 0),
+            item_cess: Number(item.item_cess ?? item.cess ?? 0),
+            trx_total: Number(item.subtotal || 0),
             status_flag: "N",
           })
       );
@@ -791,6 +927,7 @@ const custController = {
         ordMast,
         trxItems
       );
+
       const pdfBuffer = await generatePdfBuffer(htmlBill);
 
       res.set(
@@ -801,7 +938,10 @@ const custController = {
       res.send(pdfBuffer);
     } catch (error) {
       console.error("Order Error:", error);
-      res.status(500).json({ message: "Order failed", error: error.message });
+      res.status(500).json({
+        message: "Order failed",
+        error: error.message,
+      });
     }
   },
   deleteCompMast: async (req, res) => {
