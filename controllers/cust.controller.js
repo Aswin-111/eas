@@ -1610,10 +1610,8 @@ const custController = {
     }
   },
   deleteOrder: async (req, res) => {
-    const session = await mongoose.startSession();
-
     try {
-      const comp_code = String(req.comp_code).trim();
+      const comp_code = String(req.comp_code || "").trim();
       const user_code = String(req.user?.user_id || "").trim();
       const ord_no = Number(req.params.ord_no);
 
@@ -1625,15 +1623,23 @@ const custController = {
         comp_code,
         ord_no,
         user_code,
-      });
+      }).lean();
 
       if (!existingOrder) {
         return res.status(404).json({ message: "Order not found" });
       }
 
-      await session.withTransaction(async () => {
-        await OrdTrxfile.deleteMany({ comp_code, ord_no }, { session });
-        await OrdMast.deleteOne({ comp_code, ord_no, user_code }, { session });
+      // delete line items first
+      await OrdTrxfile.deleteMany({
+        comp_code,
+        ord_no,
+      });
+
+      // then delete order master
+      await OrdMast.deleteOne({
+        comp_code,
+        ord_no,
+        user_code,
       });
 
       return res.status(200).json({
@@ -1646,11 +1652,8 @@ const custController = {
         message: "Internal server error",
         error: error.message,
       });
-    } finally {
-      session.endSession();
     }
-  }
-
+  },
 };
 
 async function generateHTMLBill(comp_code, ord_no, ordMast, trxItems) {
