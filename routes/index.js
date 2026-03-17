@@ -49,4 +49,10 @@ router.post("/deleteitemmast", custController.deleteItemMast);
 // ✅ VB6 Pull Endpoints (Mongo -> JSON)
 router.get("/pull-ordermast", auth, custController.pullOrderMast);
 router.get("/pull-ordertrxfile", auth, custController.pullOrderTrxfile);
+
+
+router.post("/delete-all-custmast", auth, custController.deleteAllCustMast);
+router.post("/delete-all-itemmast", auth, custController.deleteAllItemMast);
+router.post("/delete-all-usermast", auth, custController.deleteAllUserMast);
 export default router;
+

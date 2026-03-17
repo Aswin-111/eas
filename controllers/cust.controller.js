@@ -17,7 +17,10 @@ import bcrypt from "bcryptjs";
 // ==========================================
 // ✅ ADD THESE SCHEMAS & HELPERS
 // ==========================================
-
+const round2 = (value) => {
+  const num = Number(value || 0);
+  return Math.round((num + Number.EPSILON) * 100) / 100;
+};
 const formatZodError = (error) => {
   return error.errors.map((e) => ({
     field: e.path.join("."),
@@ -1472,8 +1475,6 @@ const custController = {
   },
 
   updateOrderDetails: async (req, res) => {
-    const session = await mongoose.startSession();
-
     try {
       const comp_code = String(req.comp_code).trim();
       const user_code = String(req.user?.user_id || "").trim();
@@ -1483,16 +1484,12 @@ const custController = {
         return res.status(400).json({ message: "Invalid request context" });
       }
 
-      const {
-        customer,
-        items,
-        ord_date,
-        ord_time,
-        status_flag,
-      } = req.body || {};
+      const { customer, items, ord_date, ord_time, status_flag } = req.body || {};
 
       if (!Array.isArray(items) || items.length === 0) {
-        return res.status(400).json({ message: "At least one item is required" });
+        return res
+          .status(400)
+          .json({ message: "At least one item is required" });
       }
 
       const existingOrder = await OrdMast.findOne({
@@ -1504,6 +1501,16 @@ const custController = {
       if (!existingOrder) {
         return res.status(404).json({ message: "Order not found" });
       }
+
+      const round2 = (value) => {
+        const num = Number(value || 0);
+        return Math.round((num + Number.EPSILON) * 100) / 100;
+      };
+
+      const toNum = (value, fallback = 0) => {
+        const num = Number(value);
+        return Number.isFinite(num) ? num : fallback;
+      };
 
       const normalizedItems = items.map((item, index) => {
         const qty = toNum(item.qty, 0);
@@ -1535,60 +1542,57 @@ const custController = {
       const trx_total = round2(
         normalizedItems.reduce((sum, item) => sum + item.trx_total, 0)
       );
+
       const trx_netamount = trx_total;
+
       const trx_disc = round2(
-        normalizedItems.reduce(
-          (sum, item) => sum + ((item.item_price * item.item_disc) / 100) * item.item_qty,
-          0
-        )
+        normalizedItems.reduce((sum, item) => {
+          return sum + (((item.item_price * item.item_disc) / 100) * item.item_qty);
+        }, 0)
       );
 
-      await session.withTransaction(async () => {
-        await OrdMast.updateOne(
-          { comp_code, ord_no, user_code },
-          {
-            $set: {
-              ord_date: ord_date || existingOrder.ord_date,
-              ord_time: ord_time || existingOrder.ord_time,
-              act_code: customer?.code ?? existingOrder.act_code,
-              act_name: customer?.name ?? existingOrder.act_name,
-              act_phone: customer?.phone ?? existingOrder.act_phone,
-              act_address: customer?.address ?? existingOrder.act_address,
-              act_area: customer?.area ?? existingOrder.act_area,
-              act_type: customer?.type ?? existingOrder.act_type,
-              status_flag: status_flag ?? existingOrder.status_flag,
-              trx_disc,
-              trx_total,
-              trx_netamount,
-            },
+      await OrdMast.updateOne(
+        { comp_code, ord_no, user_code },
+        {
+          $set: {
+            ord_date: ord_date || existingOrder.ord_date,
+            ord_time: ord_time || existingOrder.ord_time,
+            act_code: customer?.code ?? existingOrder.act_code,
+            act_name: customer?.name ?? existingOrder.act_name,
+            act_phone: customer?.phone ?? existingOrder.act_phone,
+            act_address: customer?.address ?? existingOrder.act_address,
+            act_area: customer?.area ?? existingOrder.act_area,
+            act_type: customer?.type ?? existingOrder.act_type,
+            status_flag: status_flag ?? existingOrder.status_flag,
+            trx_disc,
+            trx_total,
+            trx_netamount,
           },
-          { session }
-        );
-
-        await OrdTrxfile.deleteMany({ comp_code, ord_no }, { session });
-
-        if (normalizedItems.length > 0) {
-          await OrdTrxfile.insertMany(
-            normalizedItems.map((item) => ({
-              comp_code,
-              ord_no,
-              ord_date: ord_date || existingOrder.ord_date,
-              line_no: item.line_no,
-              item_code: item.item_code,
-              item_name: item.item_name,
-              item_qty: item.item_qty,
-              item_mrp: item.item_mrp,
-              item_price: item.item_price,
-              item_tax: item.item_tax,
-              item_disc: item.item_disc,
-              item_cess: item.item_cess,
-              trx_total: item.trx_total,
-              status_flag: status_flag ?? existingOrder.status_flag,
-            })),
-            { session }
-          );
         }
-      });
+      );
+
+      await OrdTrxfile.deleteMany({ comp_code, ord_no });
+
+      if (normalizedItems.length > 0) {
+        await OrdTrxfile.insertMany(
+          normalizedItems.map((item) => ({
+            comp_code,
+            ord_no,
+            ord_date: ord_date || existingOrder.ord_date,
+            line_no: item.line_no,
+            item_code: item.item_code,
+            item_name: item.item_name,
+            item_qty: item.item_qty,
+            item_mrp: item.item_mrp,
+            item_price: item.item_price,
+            item_tax: item.item_tax,
+            item_disc: item.item_disc,
+            item_cess: item.item_cess,
+            trx_total: item.trx_total,
+            status_flag: status_flag ?? existingOrder.status_flag,
+          }))
+        );
+      }
 
       return res.status(200).json({
         message: "Order updated successfully",
@@ -1605,8 +1609,6 @@ const custController = {
         message: "Internal server error",
         error: error.message,
       });
-    } finally {
-      session.endSession();
     }
   },
   deleteOrder: async (req, res) => {
@@ -1648,6 +1650,110 @@ const custController = {
       });
     } catch (error) {
       console.error("deleteOrder error:", error);
+      return res.status(500).json({
+        message: "Internal server error",
+        error: error.message,
+      });
+    }
+  },
+  deleteAllCustMast: async (req, res) => {
+    try {
+      const tokenCompCode = String(req.comp_code || "").trim();
+      const bodyCompCode = String(req.body?.comp_code || "").trim();
+
+      if (!bodyCompCode) {
+        return res.status(400).json({ message: "comp_code is required" });
+      }
+
+      if (!tokenCompCode) {
+        return res.status(401).json({ message: "Unauthorized: missing comp_code in token" });
+      }
+
+      if (tokenCompCode !== bodyCompCode) {
+        return res.status(403).json({
+          message: "Forbidden: you can delete only your own company data",
+        });
+      }
+
+      const result = await CustMast.deleteMany({ comp_code: bodyCompCode });
+
+      return res.status(200).json({
+        message: "CustMast records deleted successfully",
+        comp_code: bodyCompCode,
+        deletedCount: result.deletedCount,
+      });
+    } catch (error) {
+      console.error("deleteAllCustMast error:", error);
+      return res.status(500).json({
+        message: "Internal server error",
+        error: error.message,
+      });
+    }
+  },
+
+  deleteAllItemMast: async (req, res) => {
+    try {
+      const tokenCompCode = String(req.comp_code || "").trim();
+      const bodyCompCode = String(req.body?.comp_code || "").trim();
+
+      if (!bodyCompCode) {
+        return res.status(400).json({ message: "comp_code is required" });
+      }
+
+      if (!tokenCompCode) {
+        return res.status(401).json({ message: "Unauthorized: missing comp_code in token" });
+      }
+
+      if (tokenCompCode !== bodyCompCode) {
+        return res.status(403).json({
+          message: "Forbidden: you can delete only your own company data",
+        });
+      }
+
+      const result = await ItemMast.deleteMany({ comp_code: bodyCompCode });
+
+      return res.status(200).json({
+        message: "ItemMast records deleted successfully",
+        comp_code: bodyCompCode,
+        deletedCount: result.deletedCount,
+      });
+    } catch (error) {
+      console.error("deleteAllItemMast error:", error);
+      return res.status(500).json({
+        message: "Internal server error",
+        error: error.message,
+      });
+    }
+  },
+
+  deleteAllUserMast: async (req, res) => {
+    try {
+      const tokenCompCode = String(req.comp_code || "").trim();
+      const bodyCompCode = String(req.body?.comp_code || "").trim();
+
+      if (!bodyCompCode) {
+        return res.status(400).json({ message: "comp_code is required" });
+      }
+
+      if (!tokenCompCode) {
+        return res.status(401).json({ message: "Unauthorized: missing comp_code in token" });
+      }
+
+      if (tokenCompCode !== bodyCompCode) {
+        return res.status(403).json({
+          message: "Forbidden: you can delete only your own company data",
+        });
+      }
+
+      const result = await UserMast.deleteMany({ comp_code: bodyCompCode });
+
+      return res.status(200).json({
+        message: "UserMast records deleted successfully",
+        comp_code: bodyCompCode,
+        deletedCount: result.deletedCount,
+      });
+    } catch (error) {
+      console.error("deleteAllUserMast error:", error);
       return res.status(500).json({
         message: "Internal server error",
         error: error.message,
