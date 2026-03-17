@@ -1660,7 +1660,8 @@ const custController = {
     try {
       const tokenCompCode = String(req.comp_code || "").trim();
       const bodyCompCode = String(req.body?.comp_code || "").trim();
-
+      console.log("Compcode : ", tokenCompCode, bodyCompCode)
+      console.log("Compcode check: ", tokenCompCode === bodyCompCode)
       if (!bodyCompCode) {
         return res.status(400).json({ message: "comp_code is required" });
       }
