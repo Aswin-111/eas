@@ -103,6 +103,27 @@ const toNum = (v, d = 0) => {
   return Number.isFinite(n) ? n : d;
 };
 const custController = {
+  getAllUsers: async (req, res) => {
+    try {
+      const comp_code = req.comp_code;
+
+      const users = await UserMast.find({ comp_code })
+        .select("-user_password")
+        .sort({ user_name: 1 });
+
+      return res.status(200).json({
+        message: "Users fetched successfully",
+        count: users.length,
+        data: users,
+      });
+    } catch (error) {
+      console.error("getAllUsers error:", error);
+      return res.status(500).json({
+        message: "Internal Server Error",
+        error: error.message,
+      });
+    }
+  },
   getAllCust: async (req, res) => {
     try {
       const comp_code = req.comp_code;

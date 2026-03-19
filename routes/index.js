@@ -4,7 +4,7 @@ const router = express.Router();
 import { login } from "../controllers/auth.controller.js";
 import custController from "../controllers/cust.controller.js";
 import auth from "../middleware/auth.js";
-
+import adminAuth from "../middleware/adminAuth.js";
 router.get("/", (req, res) => {
   res.send("Welcome to the API");
 });
@@ -12,6 +12,8 @@ router.get("/", (req, res) => {
 router.post("/login", login);
 
 // ✅ Protected routes (comp_code comes from token)
+
+router.get("/users", auth, custController.getAllUsers);
 router.get("/allcust", auth, custController.getAllCust);
 router.post("/shopdetails", auth, custController.getAllShopDetails);
 router.post("/orders", auth, custController.orders);
@@ -33,7 +35,7 @@ router.delete("/orders/:ord_no", auth, custController.deleteOrder);
 
 router.post("/sync-itemmast", auth, custController.syncItemMast);
 router.post("/sync-custmast", auth, custController.syncCustMast);
-router.post("/sync-usermast", auth, custController.syncUserMast);
+router.post("/sync-usermast", adminAuth, custController.syncUserMast);
 
 // ============================================================
 
