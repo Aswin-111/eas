@@ -13,7 +13,7 @@ router.post("/login", login);
 
 // ✅ Protected routes (comp_code comes from token)
 
-router.get("/users", auth, custController.getAllUsers);
+router.get("/users", adminAuth, custController.getAllUsers);
 router.get("/allcust", auth, custController.getAllCust);
 router.post("/shopdetails", auth, custController.getAllShopDetails);
 router.post("/orders", auth, custController.orders);

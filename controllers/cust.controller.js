@@ -105,9 +105,8 @@ const toNum = (v, d = 0) => {
 const custController = {
   getAllUsers: async (req, res) => {
     try {
-      const comp_code = req.comp_code;
 
-      const users = await UserMast.find({ comp_code })
+      const users = await UserMast.find({  })
         .select("-user_password")
         .sort({ user_name: 1 });
 
