@@ -106,7 +106,7 @@ const custController = {
   getAllUsers: async (req, res) => {
     try {
 
-      const users = await UserMast.find({  })
+      const users = await UserMast.find({})
         .select("-user_password")
         .sort({ user_name: 1 });
 
@@ -131,7 +131,7 @@ const custController = {
       const limitNum = Math.max(Number(req.query.limit || 10), 1);
       const skip = (pageNum - 1) * limitNum;
       const area = req.query.area?.trim();
-
+      const name = req.query.name?.trim();
       const compStr = String(comp_code).trim();
       const compNum = Number(comp_code);
 
@@ -142,6 +142,7 @@ const custController = {
       const query = {
         comp_code: { $in: compVariants },
         ...(area ? { cust_area: area } : {}),
+        ...(name ? { cust_name: { $regex: name, $options: "i" } } : {}),
       };
 
       const totalMatching = await CustMast.countDocuments(query);
