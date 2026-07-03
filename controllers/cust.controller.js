@@ -186,33 +186,63 @@ const custController = {
 
 
 
- getAllShopDetails: async (req, res) => {
+getAllShopDetails: async (req, res) => {
   try {
-    const comp_code = req.comp_code;
-    const search = (req.body?.search || req.query?.search || '').toString().trim();
+    const comp_code = String(req.comp_code ?? "").trim();
+    const search = String(
+      req.body?.search ?? req.query?.search ?? ""
+    ).trim();
 
-    let query = { comp_code: String(comp_code) };
-
-    if (search.length > 0) {
-      const regex = new RegExp(search, 'i'); // partial + case-insensitive
-      query = {
-        comp_code: String(comp_code),
-        $or: [
-          { item_code: { $regex: regex } },
-          { item_name: { $regex: regex } }
-        ]
-      };
+    if (!comp_code) {
+      return res.status(400).json({
+        message: "Company code is missing",
+      });
     }
 
-    const shopDetails = await ItemMast.find(query)
-      .sort({ item_name: 1 })   // nice to have
-      .lean();                  // faster plain JS objects
+    const query = {
+      comp_code,
+    };
 
-    return res.status(200).json(shopDetails);
+    if (search) {
+      const safeSearch = escapeRegex(search);
+
+      query.$or = [
+        {
+          item_code: {
+            $regex: safeSearch,
+            $options: "i",
+          },
+        },
+        {
+          item_name: {
+            $regex: safeSearch,
+            $options: "i",
+          },
+        },
+      ];
+    }
+
+    const [shopDetails, total] = await Promise.all([
+      ItemMast.find(query)
+        .sort({
+          item_name: 1,
+          item_code: 1,
+        })
+        .lean(),
+
+      ItemMast.countDocuments(query),
+    ]);
+
+    return res.status(200).json({
+      total,
+      data: shopDetails,
+    });
   } catch (error) {
-    return res.status(500).json({ 
-      message: "Internal server error", 
-      error: error.message 
+    console.error("getAllShopDetails error:", error);
+
+    return res.status(500).json({
+      message: "Internal server error",
+      error: error.message,
     });
   }
 },
@@ -1098,52 +1128,178 @@ const custController = {
   },
 
 
-  syncItemMast: async (req, res) => {
-    try {
-      // 1. Validate
-      const validation = itemMastSchema.safeParse(req.body);
-      if (!validation.success) {
-        return res.status(400).json({
-          message: "Validation Failed",
-          errors: formatZodError(validation.error),
+syncItemMast: async (req, res) => {
+  try {
+    const validation = itemMastSchema.safeParse(req.body);
+
+    if (!validation.success) {
+      return res.status(400).json({
+        message: "Validation failed",
+        errors: formatZodError(validation.error),
+      });
+    }
+
+    const receivedItems = validation.data;
+
+    if (!Array.isArray(receivedItems) || receivedItems.length === 0) {
+      return res.status(200).json({
+        message: "No items to sync",
+        details: {
+          received: 0,
+          synced: 0,
+        },
+      });
+    }
+
+    /*
+     * Normalize and validate the identifying fields.
+     *
+     * Do not use String(undefined) because it produces "undefined".
+     * Do not use String(null) because it produces "null".
+     */
+    const normalizedItems = [];
+    const invalidItems = [];
+
+    receivedItems.forEach((item, index) => {
+      const comp_code = String(
+        item.comp_code ?? req.comp_code ?? ""
+      ).trim();
+
+      const item_code = String(item.item_code ?? "").trim();
+
+      if (!comp_code || !item_code) {
+        invalidItems.push({
+          index,
+          comp_code,
+          item_code,
+          reason: !comp_code
+            ? "comp_code is missing"
+            : "item_code is missing",
+        });
+
+        return;
+      }
+
+      normalizedItems.push({
+        ...item,
+        comp_code,
+        item_code,
+      });
+    });
+
+    if (invalidItems.length > 0) {
+      return res.status(400).json({
+        message: "Some items have missing identifying fields",
+        details: {
+          received: receivedItems.length,
+          valid: normalizedItems.length,
+          invalid: invalidItems.length,
+          invalidExamples: invalidItems.slice(0, 20),
+        },
+      });
+    }
+
+    /*
+     * Detect repeated comp_code + item_code values.
+     */
+    const uniqueItemMap = new Map();
+    const duplicateItems = [];
+
+    normalizedItems.forEach((item, index) => {
+      const uniqueKey = `${item.comp_code}::${item.item_code}`;
+
+      if (uniqueItemMap.has(uniqueKey)) {
+        duplicateItems.push({
+          index,
+          comp_code: item.comp_code,
+          item_code: item.item_code,
         });
       }
 
-      const items = validation.data;
-      if (items.length === 0) {
-        return res.status(200).json({ message: "No items to sync." });
-      }
+      // The final occurrence would otherwise overwrite earlier occurrences.
+      uniqueItemMap.set(uniqueKey, item);
+    });
 
-      // 2. Prepare Bulk Ops (Match comp_code AND item_code)
-      const bulkOps = items.map((item) => ({
+    const uniqueItems = Array.from(uniqueItemMap.values());
+
+    /*
+     * Reject duplicates rather than silently losing rows.
+     *
+     * If duplicate item codes are intentional, you need another identifier,
+     * such as barcode, batch_code, row_id or variant_code.
+     */
+    if (duplicateItems.length > 0) {
+      return res.status(409).json({
+        message:
+          "Duplicate comp_code and item_code combinations found in payload",
+        details: {
+          received: receivedItems.length,
+          uniqueItems: uniqueItems.length,
+          duplicateRows: duplicateItems.length,
+          duplicateExamples: duplicateItems.slice(0, 20),
+        },
+      });
+    }
+
+    const chunkSize = 500;
+
+    let matchedCount = 0;
+    let modifiedCount = 0;
+    let upsertedCount = 0;
+
+    for (let start = 0; start < uniqueItems.length; start += chunkSize) {
+      const chunk = uniqueItems.slice(start, start + chunkSize);
+
+      const bulkOps = chunk.map((item) => ({
         updateOne: {
           filter: {
-            comp_code: String(item.comp_code),
-            item_code: String(item.item_code),
+            comp_code: item.comp_code,
+            item_code: item.item_code,
           },
-          update: { $set: item }, // Replace fields from JSON into DB
-          upsert: true, // Create if not found
+          update: {
+            $set: item,
+          },
+          upsert: true,
         },
       }));
 
-      // 3. Execute
-      const result = await ItemMast.bulkWrite(bulkOps);
-
-      return res.status(200).json({
-        message: "Item Master synced successfully",
-        details: {
-          matched: result.matchedCount,
-          modified: result.modifiedCount,
-          upserted: result.upsertedCount,
-        },
+      const result = await ItemMast.bulkWrite(bulkOps, {
+        ordered: false,
       });
-    } catch (error) {
-      console.error("syncItemMast error:", error);
-      return res
-        .status(500)
-        .json({ message: "Internal Server Error", error: error.message });
+
+      matchedCount += result.matchedCount ?? 0;
+      modifiedCount += result.modifiedCount ?? 0;
+      upsertedCount += result.upsertedCount ?? 0;
     }
-  },
+
+    const databaseCount = await ItemMast.countDocuments({
+      comp_code: {
+        $in: [...new Set(uniqueItems.map((item) => item.comp_code))],
+      },
+    });
+
+    return res.status(200).json({
+      message: "Item Master synced successfully",
+      details: {
+        received: receivedItems.length,
+        valid: normalizedItems.length,
+        uniqueItems: uniqueItems.length,
+        duplicateRows: duplicateItems.length,
+        matched: matchedCount,
+        modified: modifiedCount,
+        upserted: upsertedCount,
+        databaseCount,
+      },
+    });
+  } catch (error) {
+    console.error("syncItemMast error:", error);
+
+    return res.status(500).json({
+      message: "Internal Server Error",
+      error: error.message,
+    });
+  }
+},
 
   // ------------------------------------------
   // ✅ NEW: Sync Customer Master (Upsert)
@@ -1535,15 +1691,9 @@ const custController = {
         return res.status(404).json({ message: "Order not found" });
       }
 
-      const round2 = (value) => {
-        const num = Number(value || 0);
-        return Math.round((num + Number.EPSILON) * 100) / 100;
-      };
+  
 
-      const toNum = (value, fallback = 0) => {
-        const num = Number(value);
-        return Number.isFinite(num) ? num : fallback;
-      };
+   
 
       const normalizedItems = items.map((item, index) => {
         const qty = toNum(item.qty, 0);
@@ -1644,51 +1794,69 @@ const custController = {
       });
     }
   },
-  deleteOrder: async (req, res) => {
-    try {
-      const comp_code = String(req.comp_code || "").trim();
-      const user_code = String(req.user?.user_id || "").trim();
-      const ord_no = Number(req.params.ord_no);
+ deleteOrder: async (req, res) => {
+  try {
+    const comp_code = String(req.comp_code ?? "").trim();
+    const user_code = String(req.user?.user_id ?? "").trim();
+    const ord_no = Number(req.params.ord_no);
 
-      if (!comp_code || !user_code || !ord_no) {
-        return res.status(400).json({ message: "Invalid request context" });
-      }
-
-      const existingOrder = await OrdMast.findOne({
-        comp_code,
-        ord_no,
-        user_code,
-      }).lean();
-
-      if (!existingOrder) {
-        return res.status(404).json({ message: "Order not found" });
-      }
-
-      // delete line items first
-      await OrdTrxfile.deleteMany({
-        comp_code,
-        ord_no,
-      });
-
-      // then delete order master
-      await OrdMast.deleteOne({
-        comp_code,
-        ord_no,
-        user_code,
-      });
-
-      return res.status(200).json({
-        message: "Order deleted successfully",
-        ord_no,
-      });
-    } catch (error) {
-      console.error("deleteOrder error:", error);
-      return res.status(500).json({
-        message: "Internal server error",
-        error: error.message,
+    if (
+      !comp_code ||
+      !user_code ||
+      !Number.isSafeInteger(ord_no) ||
+      ord_no <= 0
+    ) {
+      return res.status(400).json({
+        message: "Invalid request context",
       });
     }
-  },
+
+    const existingOrder = await OrdMast.findOne({
+      comp_code,
+      ord_no,
+      user_code,
+    }).lean();
+
+    if (!existingOrder) {
+      return res.status(404).json({
+        message: "Order not found",
+      });
+    }
+
+    const lineDeleteResult = await OrdTrxfile.deleteMany({
+      comp_code,
+      ord_no,
+    });
+
+    const orderDeleteResult = await OrdMast.deleteOne({
+      comp_code,
+      ord_no,
+      user_code,
+    });
+
+    if (orderDeleteResult.deletedCount !== 1) {
+      return res.status(409).json({
+        message: "Order master could not be deleted",
+        ord_no,
+        deletedLineItems: lineDeleteResult.deletedCount,
+      });
+    }
+
+    return res.status(200).json({
+      message: "Order deleted successfully",
+      ord_no,
+      deletedLineItems: lineDeleteResult.deletedCount,
+      deletedOrders: orderDeleteResult.deletedCount,
+    });
+  } catch (error) {
+    console.error("deleteOrder error:", error);
+
+    return res.status(500).json({
+      message: "Internal server error",
+      error: error.message,
+    });
+  }
+},
   deleteAllCustMast: async (req, res) => {
     try {
       const tokenCompCode = String(req.comp_code || "").trim();
