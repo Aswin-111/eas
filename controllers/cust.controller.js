@@ -186,24 +186,36 @@ const custController = {
 
 
 
-  getAllShopDetails: async (req, res) => {
-    try {
-      const comp_code = req.comp_code;
-      const shopDetails = await ItemMast.find({ comp_code: String(comp_code) });
+ getAllShopDetails: async (req, res) => {
+  try {
+    const comp_code = req.comp_code;
+    const search = (req.body?.search || req.query?.search || '').toString().trim();
 
+    let query = { comp_code: String(comp_code) };
 
-      // console.log(shopDetails, "werty");
-      if (shopDetails.length > 0) {
-        return res.status(200).json(shopDetails);
-      } else {
-        return res.status(200).json([]);
-      }
-    } catch (error) {
-      res
-        .status(500)
-        .json({ message: "Internal server error", error: error.message });
+    if (search.length > 0) {
+      const regex = new RegExp(search, 'i'); // partial + case-insensitive
+      query = {
+        comp_code: String(comp_code),
+        $or: [
+          { item_code: { $regex: regex } },
+          { item_name: { $regex: regex } }
+        ]
+      };
     }
-  },
+
+    const shopDetails = await ItemMast.find(query)
+      .sort({ item_name: 1 })   // nice to have
+      .lean();                  // faster plain JS objects
+
+    return res.status(200).json(shopDetails);
+  } catch (error) {
+    return res.status(500).json({ 
+      message: "Internal server error", 
+      error: error.message 
+    });
+  }
+},
   addCustDetails: async (req, res) => {
     try {
       const customers = req.body.customers; // Expecting an array of customers
