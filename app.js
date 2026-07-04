@@ -14,7 +14,7 @@ app.use(
 );
 
 
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '40mb' }));
 
 // Connect to MongoDB
 connectDB();

@@ -1131,7 +1131,6 @@ getAllShopDetails: async (req, res) => {
 syncItemMast: async (req, res) => {
   try {
     const validation = itemMastSchema.safeParse(req.body);
-
     if (!validation.success) {
       return res.status(400).json({
         message: "Validation failed",
@@ -1139,164 +1138,90 @@ syncItemMast: async (req, res) => {
       });
     }
 
-    const receivedItems = validation.data;
+    let receivedItems = validation.data;
 
     if (!Array.isArray(receivedItems) || receivedItems.length === 0) {
-      return res.status(200).json({
-        message: "No items to sync",
-        details: {
-          received: 0,
-          synced: 0,
-        },
-      });
+      return res.status(200).json({ message: "No items to sync" });
     }
 
-    /*
-     * Normalize and validate the identifying fields.
-     *
-     * Do not use String(undefined) because it produces "undefined".
-     * Do not use String(null) because it produces "null".
-     */
     const normalizedItems = [];
     const invalidItems = [];
-
+    const duplicateCheck = new Map();
+    console.log("Total items sync itemmast:", receivedItems?.length)
     receivedItems.forEach((item, index) => {
-      const comp_code = String(
-        item.comp_code ?? req.comp_code ?? ""
-      ).trim();
-
-      const item_code = String(item.item_code ?? "").trim();
-
+      const comp_code = String(item.comp_code ?? req.comp_code ?? "").trim();
+      let item_code = String(item.item_code ?? "").trim();
       if (!comp_code || !item_code) {
-        invalidItems.push({
-          index,
-          comp_code,
-          item_code,
-          reason: !comp_code
-            ? "comp_code is missing"
-            : "item_code is missing",
-        });
-
+        invalidItems.push({ index, comp_code, item_code, reason: "missing key fields" });
         return;
       }
+      // Normalize item_code (important!)
+      item_code = item_code.replace(/\s+/g, ''); // remove extra spaces
+      const key = `${comp_code}::${item_code}`;
+      if (duplicateCheck.has(key)) {
+        // Keep the last occurrence but log it
+        console.warn(`Duplicate item_code ${item_code} for comp ${comp_code}`);
+      }
+
+      duplicateCheck.set(key, true);
 
       normalizedItems.push({
         ...item,
         comp_code,
-        item_code,
+        item_code,           // ← normalized
       });
     });
 
     if (invalidItems.length > 0) {
-      return res.status(400).json({
-        message: "Some items have missing identifying fields",
-        details: {
-          received: receivedItems.length,
-          valid: normalizedItems.length,
-          invalid: invalidItems.length,
-          invalidExamples: invalidItems.slice(0, 20),
-        },
-      });
+      console.warn(`${invalidItems.length} invalid items skipped`);
     }
 
-    /*
-     * Detect repeated comp_code + item_code values.
-     */
-    const uniqueItemMap = new Map();
-    const duplicateItems = [];
+    console.log(`Processing ${normalizedItems.length} unique items for sync`);
 
-    normalizedItems.forEach((item, index) => {
-      const uniqueKey = `${item.comp_code}::${item.item_code}`;
+    const chunkSize = 400; // smaller chunks = safer
+    let matched = 0, modified = 0, upserted = 0;
 
-      if (uniqueItemMap.has(uniqueKey)) {
-        duplicateItems.push({
-          index,
-          comp_code: item.comp_code,
-          item_code: item.item_code,
-        });
-      }
+    for (let i = 0; i < normalizedItems.length; i += chunkSize) {
+      const chunk = normalizedItems.slice(i, i + chunkSize);
 
-      // The final occurrence would otherwise overwrite earlier occurrences.
-      uniqueItemMap.set(uniqueKey, item);
-    });
-
-    const uniqueItems = Array.from(uniqueItemMap.values());
-
-    /*
-     * Reject duplicates rather than silently losing rows.
-     *
-     * If duplicate item codes are intentional, you need another identifier,
-     * such as barcode, batch_code, row_id or variant_code.
-     */
-    if (duplicateItems.length > 0) {
-      return res.status(409).json({
-        message:
-          "Duplicate comp_code and item_code combinations found in payload",
-        details: {
-          received: receivedItems.length,
-          uniqueItems: uniqueItems.length,
-          duplicateRows: duplicateItems.length,
-          duplicateExamples: duplicateItems.slice(0, 20),
-        },
-      });
-    }
-
-    const chunkSize = 500;
-
-    let matchedCount = 0;
-    let modifiedCount = 0;
-    let upsertedCount = 0;
-
-    for (let start = 0; start < uniqueItems.length; start += chunkSize) {
-      const chunk = uniqueItems.slice(start, start + chunkSize);
-
-      const bulkOps = chunk.map((item) => ({
+      const bulkOps = chunk.map(item => ({
         updateOne: {
-          filter: {
-            comp_code: item.comp_code,
-            item_code: item.item_code,
-          },
-          update: {
-            $set: item,
-          },
-          upsert: true,
-        },
+          filter: { comp_code: item.comp_code, item_code: item.item_code },
+          update: { $set: item },
+          upsert: true
+        }
       }));
 
-      const result = await ItemMast.bulkWrite(bulkOps, {
-        ordered: false,
-      });
+      const result = await ItemMast.bulkWrite(bulkOps, { ordered: false });
 
-      matchedCount += result.matchedCount ?? 0;
-      modifiedCount += result.modifiedCount ?? 0;
-      upsertedCount += result.upsertedCount ?? 0;
+      matched += result.matchedCount ?? 0;
+      modified += result.modifiedCount ?? 0;
+      upserted += result.upsertedCount ?? 0;
     }
 
-    const databaseCount = await ItemMast.countDocuments({
-      comp_code: {
-        $in: [...new Set(uniqueItems.map((item) => item.comp_code))],
-      },
+    const finalCount = await ItemMast.countDocuments({
+      comp_code: { $in: [...new Set(normalizedItems.map(i => i.comp_code))] }
     });
 
     return res.status(200).json({
       message: "Item Master synced successfully",
       details: {
         received: receivedItems.length,
-        valid: normalizedItems.length,
-        uniqueItems: uniqueItems.length,
-        duplicateRows: duplicateItems.length,
-        matched: matchedCount,
-        modified: modifiedCount,
-        upserted: upsertedCount,
-        databaseCount,
-      },
+        processed: normalizedItems.length,
+        invalid: invalidItems.length,
+        matched,
+        modified,
+        upserted,
+        finalCount
+      }
     });
+
   } catch (error) {
     console.error("syncItemMast error:", error);
-
     return res.status(500).json({
       message: "Internal Server Error",
       error: error.message,
+      stack: error.stack
     });
   }
 },
