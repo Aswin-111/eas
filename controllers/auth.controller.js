@@ -93,3 +93,50 @@ export const login = async (req, res) => {
     return res.status(500).json({ message: "Server error" });
   }
 };
+
+// ✅ NEW: billing-admin-sec login
+// Simple UserMast-only login, no mac_address/device-whitelist/session logic at all.
+// Only requires user_name and user_password.
+export const billingAdminLogin = async (req, res) => {
+  const { user_name, user_password } = req.body;
+
+  if (!user_name || !user_password) {
+    return res.status(400).json({ message: "user_name and user_password are required" });
+  }
+
+  try {
+    const user = await UserMast.findOne({ user_name });
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const isMatch = await bcrypt.compare(String(user_password), user.user_password);
+
+    if (!isMatch) {
+      return res.status(401).json({ message: "Invalid credentials" });
+    }
+
+    const payload = {
+      user: {
+        role: "user",
+        comp_code: user.comp_code,
+        user_id: user.user_id,
+        user_name: user.user_name,
+        user_type: user.user_type,
+      },
+    };
+
+    const token = jwt.sign(payload, process.env.JWT_SECRET || "supersecret", {
+      expiresIn: "7d",
+    });
+
+    return res.json({
+      token,
+      user: payload.user,
+    });
+  } catch (error) {
+    console.error("Billing admin login error:", error);
+    return res.status(500).json({ message: "Server error" });
+  }
+};

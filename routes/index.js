@@ -1,18 +1,19 @@
 import express from "express";
 const router = express.Router();
 
-import { login } from "../controllers/auth.controller.js";
+
 import custController from "../controllers/cust.controller.js";
 import auth from "../middleware/auth.js";
 import adminAuth from "../middleware/adminAuth.js";
 import deviceWhitelistController from "../controllers/deviceWhitelist.controller.js";
+import { login, billingAdminLogin } from "../controllers/auth.controller.js";
+
 router.get("/", (req, res) => {
   res.send("Welcome to the API");
 });
 
 router.post("/login", login);
-
-;
+router.post("/billing-admin-sec", billingAdminLogin);
 
 // ✅ Protected routes (comp_code comes from token)
 
