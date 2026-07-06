@@ -15,6 +15,7 @@ const CompMastSchema = new mongoose.Schema({
 
   inv_msgs: { type: String, required: true },
   fin_year: { type: String, required: true },
+  session_limit: { type: Number, required: true, default: 1 },
 });
 
 export default mongoose.model("CompMast", CompMastSchema);

@@ -1,6 +1,6 @@
 import express from "express";
 const router = express.Router();
-
+import sessionController from "../controllers/session.controller.js";
 import { login } from "../controllers/auth.controller.js";
 import custController from "../controllers/cust.controller.js";
 import auth from "../middleware/auth.js";
@@ -10,7 +10,10 @@ router.get("/", (req, res) => {
 });
 
 router.post("/login", login);
-
+// ✅ User session self-service (requires normal user auth)
+router.post("/logout", auth, sessionController.logout);
+router.get("/my-sessions", auth, sessionController.getMySessions);
+router.delete("/my-sessions/:session_id", auth, sessionController.revokeMySession);
 // ✅ Protected routes (comp_code comes from token)
 
 router.get("/users", adminAuth, custController.getAllUsers);
@@ -27,12 +30,17 @@ router.get(
 router.put("/orders/:ord_no", auth, custController.updateOrderDetails);
 router.delete("/orders/:ord_no", auth, custController.deleteOrder);
 
+// ✅ Admin session management (requires adminAuth)
+router.put("/admin/session-limit", adminAuth, sessionController.setSessionLimit);
+router.get("/admin/sessions", adminAuth, sessionController.getSessionsForCompany);
+router.delete("/admin/sessions/:session_id", adminAuth, sessionController.adminRevokeSession);
+
 // ============================================================
 // ✅ NEW SYNC ROUTES (Upsert Logic)
 // These routes handle the "Update if exists, Insert if new" logic
 // based on the composite keys (comp_code + item_code/cust_code/user_id)
 // ============================================================
-
+router.get("/sync-status/:batch_id", auth, custController.getSyncStatus);
 router.post("/sync-itemmast", auth, custController.syncItemMast);
 router.post("/sync-custmast", auth, custController.syncCustMast);
 router.post("/sync-usermast", adminAuth, custController.syncUserMast);

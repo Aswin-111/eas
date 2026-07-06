@@ -13,6 +13,7 @@ import UserMast from "../models/UserMast.js";
 import puppeteer from "puppeteer";
 import pdfkit from "pdfkit";
 import bcrypt from "bcryptjs";
+import { enqueueItemSyncBatch, getBatchStatus } from "../queues/itemSyncQueue.js";
 
 // ==========================================
 // ✅ ADD THESE SCHEMAS & HELPERS
@@ -56,6 +57,14 @@ const userMastSchema = z.array(
     user_password: z.string().optional(),
   }).catchall(z.any())
 );
+// Add near the top of controllers/cust.controller.js, with the other imports:
+ 
+// Small helper used by getAllShopDetails for safe regex search (was referenced
+// but never defined in the original file).
+function escapeRegex(str) {
+  return String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+ 
 async function getLatestCustNumber(comp_code) {
   const comp = String(comp_code);
 
@@ -183,8 +192,8 @@ const custController = {
   },
 
 
-
-
+// Replace the existing `getAllShopDetails: async (req, res) => { ... }`
+// method with this paginated version.
 
 getAllShopDetails: async (req, res) => {
   try {
@@ -198,6 +207,11 @@ getAllShopDetails: async (req, res) => {
         message: "Company code is missing",
       });
     }
+
+    // ✅ Pagination params (same convention as getAllCust)
+    const pageNum = Math.max(Number(req.body?.page ?? req.query?.page ?? 1), 1);
+    const limitNum = Math.max(Number(req.body?.limit ?? req.query?.limit ?? 20), 1);
+    const skip = (pageNum - 1) * limitNum;
 
     const query = {
       comp_code,
@@ -228,6 +242,8 @@ getAllShopDetails: async (req, res) => {
           item_name: 1,
           item_code: 1,
         })
+        .skip(skip)
+        .limit(limitNum)
         .lean(),
 
       ItemMast.countDocuments(query),
@@ -235,6 +251,9 @@ getAllShopDetails: async (req, res) => {
 
     return res.status(200).json({
       total,
+      page: pageNum,
+      limit: limitNum,
+      totalPages: Math.ceil(total / limitNum),
       data: shopDetails,
     });
   } catch (error) {
@@ -246,6 +265,9 @@ getAllShopDetails: async (req, res) => {
     });
   }
 },
+
+
+
   addCustDetails: async (req, res) => {
     try {
       const customers = req.body.customers; // Expecting an array of customers
@@ -1127,104 +1149,128 @@ getAllShopDetails: async (req, res) => {
     }
   },
 
+// Replace the existing `syncItemMast: async (req, res) => { ... }` method
+// inside the custController object with this version.
 
-syncItemMast: async (req, res) => {
-  try {
-    const validation = itemMastSchema.safeParse(req.body);
-    if (!validation.success) {
-      return res.status(400).json({
-        message: "Validation failed",
-        errors: formatZodError(validation.error),
-      });
-    }
-
-    let receivedItems = validation.data;
-
-    if (!Array.isArray(receivedItems) || receivedItems.length === 0) {
-      return res.status(200).json({ message: "No items to sync" });
-    }
-
-    const normalizedItems = [];
-    const invalidItems = [];
-    const duplicateCheck = new Map();
-    console.log("Total items sync itemmast:", receivedItems?.length)
-    receivedItems.forEach((item, index) => {
-      const comp_code = String(item.comp_code ?? req.comp_code ?? "").trim();
-      let item_code = String(item.item_code ?? "").trim();
-      if (!comp_code || !item_code) {
-        invalidItems.push({ index, comp_code, item_code, reason: "missing key fields" });
-        return;
-      }
-      // Normalize item_code (important!)
-      item_code = item_code.replace(/\s+/g, ''); // remove extra spaces
-      const key = `${comp_code}::${item_code}`;
-      if (duplicateCheck.has(key)) {
-        // Keep the last occurrence but log it
-        console.warn(`Duplicate item_code ${item_code} for comp ${comp_code}`);
+  syncItemMast: async (req, res) => {
+    try {
+      const validation = itemMastSchema.safeParse(req.body);
+      if (!validation.success) {
+        return res.status(400).json({
+          message: "Validation failed",
+          errors: formatZodError(validation.error),
+        });
       }
 
-      duplicateCheck.set(key, true);
+      const receivedItems = validation.data;
 
-      normalizedItems.push({
-        ...item,
-        comp_code,
-        item_code,           // ← normalized
-      });
-    });
+      if (!Array.isArray(receivedItems) || receivedItems.length === 0) {
+        return res.status(200).json({ message: "No items to sync" });
+      }
 
-    if (invalidItems.length > 0) {
-      console.warn(`${invalidItems.length} invalid items skipped`);
-    }
+      const normalizedItems = [];
+      const invalidItems = [];
+      const duplicateCheck = new Map();
 
-    console.log(`Processing ${normalizedItems.length} unique items for sync`);
+      console.log("Total items sync itemmast:", receivedItems?.length);
 
-    const chunkSize = 400; // smaller chunks = safer
-    let matched = 0, modified = 0, upserted = 0;
+      receivedItems.forEach((item, index) => {
+        const comp_code = String(item.comp_code ?? req.comp_code ?? "").trim();
+        let item_code = String(item.item_code ?? "").trim();
 
-    for (let i = 0; i < normalizedItems.length; i += chunkSize) {
-      const chunk = normalizedItems.slice(i, i + chunkSize);
-
-      const bulkOps = chunk.map(item => ({
-        updateOne: {
-          filter: { comp_code: item.comp_code, item_code: item.item_code },
-          update: { $set: item },
-          upsert: true
+        if (!comp_code || !item_code) {
+          invalidItems.push({ index, comp_code, item_code, reason: "missing key fields" });
+          return;
         }
-      }));
 
-      const result = await ItemMast.bulkWrite(bulkOps, { ordered: false });
+        item_code = item_code.replace(/\s+/g, "");
+        const key = `${comp_code}::${item_code}`;
 
-      matched += result.matchedCount ?? 0;
-      modified += result.modifiedCount ?? 0;
-      upserted += result.upsertedCount ?? 0;
-    }
+        if (duplicateCheck.has(key)) {
+          console.warn(`Duplicate item_code ${item_code} for comp ${comp_code}`);
+        }
+        duplicateCheck.set(key, true);
 
-    const finalCount = await ItemMast.countDocuments({
-      comp_code: { $in: [...new Set(normalizedItems.map(i => i.comp_code))] }
-    });
+        normalizedItems.push({
+          ...item,
+          comp_code,
+          item_code,
+        });
+      });
 
-    return res.status(200).json({
-      message: "Item Master synced successfully",
-      details: {
-        received: receivedItems.length,
-        processed: normalizedItems.length,
-        invalid: invalidItems.length,
-        matched,
-        modified,
-        upserted,
-        finalCount
+      if (invalidItems.length > 0) {
+        console.warn(`${invalidItems.length} invalid items skipped`);
       }
-    });
 
-  } catch (error) {
-    console.error("syncItemMast error:", error);
-    return res.status(500).json({
-      message: "Internal Server Error",
-      error: error.message,
-      stack: error.stack
-    });
-  }
-},
+      if (normalizedItems.length === 0) {
+        return res.status(200).json({
+          message: "No valid items to sync",
+          details: { received: receivedItems.length, invalid: invalidItems.length },
+        });
+      }
+
+      const compCodesInBatch = [...new Set(normalizedItems.map((i) => i.comp_code))];
+
+      // Instead of running ItemMast.bulkWrite() synchronously in-request
+      // (which risks hitting Mongo's per-operation / payload limits on huge
+      // uploads), split into chunks and hand off to a Redis-backed queue
+      // (BullMQ). The worker process (workers/itemSyncWorker.js) consumes
+      // these chunk jobs and performs the actual bulkWrite calls.
+      const { batch_id, total_chunks, total_items } = await enqueueItemSyncBatch(
+        normalizedItems,
+        { comp_codes: compCodesInBatch }
+      );
+
+      return res.status(202).json({
+        message: "Item Master sync queued successfully",
+        batch_id,
+        details: {
+          received: receivedItems.length,
+          queued: total_items,
+          invalid: invalidItems.length,
+          total_chunks,
+        },
+        status_url: `/sync-status/${batch_id}`,
+      });
+    } catch (error) {
+      console.error("syncItemMast error:", error);
+      return res.status(500).json({
+        message: "Internal Server Error",
+        error: error.message,
+        stack: error.stack,
+      });
+    }
+  },
+
+  // ------------------------------------------
+  // ✅ NEW: Poll batch status for a queued item sync
+  // ------------------------------------------
+  getSyncStatus: async (req, res) => {
+    try {
+      const { batch_id } = req.params;
+
+      if (!batch_id) {
+        return res.status(400).json({ message: "batch_id is required" });
+      }
+
+      const status = await getBatchStatus(batch_id);
+
+      if (!status) {
+        return res.status(404).json({
+          message: "Batch not found or expired",
+          batch_id,
+        });
+      }
+
+      return res.status(200).json(status);
+    } catch (error) {
+      console.error("getSyncStatus error:", error);
+      return res.status(500).json({
+        message: "Internal server error",
+        error: error.message,
+      });
+    }
+  },
 
   // ------------------------------------------
   // ✅ NEW: Sync Customer Master (Upsert)
