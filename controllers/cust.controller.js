@@ -1996,6 +1996,36 @@ getAllShopDetails: async (req, res) => {
     }
   },
   // ------------------------------------------
+  // ✅ ADMIN: List all distinct comp_codes from CustMast (searchable)
+  // ------------------------------------------
+  getAllCompCodes: async (req, res) => {
+    try {
+      const search = String(req.query.search || "").trim();
+
+      let compCodes = await CustMast.distinct("comp_code");
+      compCodes = compCodes.filter(Boolean).map(String);
+
+      if (search) {
+        const lower = search.toLowerCase();
+        compCodes = compCodes.filter((code) => code.toLowerCase().includes(lower));
+      }
+
+      compCodes.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+
+      return res.status(200).json({
+        count: compCodes.length,
+        data: compCodes,
+      });
+    } catch (error) {
+      console.error("getAllCompCodes error:", error);
+      return res.status(500).json({
+        message: "Internal server error",
+        error: error.message,
+      });
+    }
+  },
+
+  // ------------------------------------------
   // ✅ ADMIN: List all companies (for company picker screen)
   // ------------------------------------------
   getAllCompanies: async (req, res) => {
