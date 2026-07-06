@@ -1933,6 +1933,93 @@ getAllShopDetails: async (req, res) => {
       });
     }
   },
+  // ------------------------------------------
+  // ✅ ADMIN: Get all customers for a given comp_code (query param, not token)
+  // Used by the whitelist admin app dashboard — admin JWT has no comp_code.
+  // ------------------------------------------
+  getAllCustAdmin: async (req, res) => {
+    try {
+      const comp_code = String(req.query.comp_code || "").trim();
+
+      if (!comp_code) {
+        return res.status(400).json({ message: "comp_code is required" });
+      }
+
+      const pageNum = Math.max(Number(req.query.page || 1), 1);
+      const limitNum = Math.max(Number(req.query.limit || 10), 1);
+      const skip = (pageNum - 1) * limitNum;
+      const area = req.query.area?.trim();
+      const name = req.query.name?.trim();
+      const compNum = Number(comp_code);
+
+      const compVariants = Number.isNaN(compNum)
+        ? [comp_code]
+        : [comp_code, String(compNum)];
+
+      const query = {
+        comp_code: { $in: compVariants },
+        ...(area ? { cust_area: area } : {}),
+        ...(name ? { cust_name: { $regex: name, $options: "i" } } : {}),
+      };
+
+      const totalMatching = await CustMast.countDocuments(query);
+
+      const customers = await CustMast.find(query)
+        .collation({ locale: "en", strength: 2 })
+        .sort({ cust_name: 1 })
+        .skip(skip)
+        .limit(limitNum)
+        .lean();
+
+      const areas = await CustMast.distinct("cust_area", query);
+
+      return res.status(200).json({
+        users: customers.map((customer) => ({
+          cust_code: customer.cust_code,
+          cust_name: customer.cust_name,
+          cust_phone: customer.cust_phone || "N/A",
+          cust_address: customer.cust_address || "N/A",
+          cust_area: customer.cust_area || "N/A",
+          cust_type: customer.cust_type || "R",
+          cust_gst: customer.cust_gst || "N/A",
+          old_bal: customer.Old_bal ?? 0,
+        })),
+        areas: areas.filter(Boolean).sort((a, b) => a.localeCompare(b)),
+        total: totalMatching,
+        page: pageNum,
+        limit: limitNum,
+        totalPages: Math.ceil(totalMatching / limitNum),
+      });
+    } catch (error) {
+      console.error("getAllCustAdmin error:", error);
+      return res.status(500).json({
+        message: "Internal server error",
+        error: error.message,
+      });
+    }
+  },
+  // ------------------------------------------
+  // ✅ ADMIN: List all companies (for company picker screen)
+  // ------------------------------------------
+  getAllCompanies: async (req, res) => {
+    try {
+      const companies = await CompMast.find({})
+        .select("comp_code comp_name comp_phone comp_email")
+        .sort({ comp_name: 1 })
+        .lean();
+
+      return res.status(200).json({
+        count: companies.length,
+        data: companies,
+      });
+    } catch (error) {
+      console.error("getAllCompanies error:", error);
+      return res.status(500).json({
+        message: "Internal server error",
+        error: error.message,
+      });
+    }
+  },
 };
 
 async function generateHTMLBill(comp_code, ord_no, ordMast, trxItems) {

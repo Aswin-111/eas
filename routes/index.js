@@ -35,7 +35,9 @@ router.post("/admin/whitelist-device", adminAuth, deviceWhitelistController.addW
 router.get("/admin/whitelisted-devices", adminAuth, deviceWhitelistController.getWhitelistedDevices);
 router.patch("/admin/whitelisted-devices/:device_id", adminAuth, deviceWhitelistController.editWhitelistedDevice);
 router.delete("/admin/whitelisted-devices/:device_id", adminAuth, deviceWhitelistController.removeWhitelistedDevice);
+router.get("/admin/allcust", adminAuth, custController.getAllCustAdmin);
 
+router.get("/admin/companies", adminAuth, custController.getAllCompanies);
 
 
 // ============================================================
