@@ -1933,34 +1933,30 @@ getAllShopDetails: async (req, res) => {
       });
     }
   },
-  // ------------------------------------------
-  // ✅ ADMIN: Get all customers for a given comp_code (query param, not token)
-  // Used by the whitelist admin app dashboard — admin JWT has no comp_code.
+ // ------------------------------------------
+  // ✅ ADMIN: Get all customers (comp_code optional — omit to search all companies)
   // ------------------------------------------
   getAllCustAdmin: async (req, res) => {
     try {
       const comp_code = String(req.query.comp_code || "").trim();
-
-      if (!comp_code) {
-        return res.status(400).json({ message: "comp_code is required" });
-      }
 
       const pageNum = Math.max(Number(req.query.page || 1), 1);
       const limitNum = Math.max(Number(req.query.limit || 10), 1);
       const skip = (pageNum - 1) * limitNum;
       const area = req.query.area?.trim();
       const name = req.query.name?.trim();
-      const compNum = Number(comp_code);
 
-      const compVariants = Number.isNaN(compNum)
-        ? [comp_code]
-        : [comp_code, String(compNum)];
+      const query = {};
 
-      const query = {
-        comp_code: { $in: compVariants },
-        ...(area ? { cust_area: area } : {}),
-        ...(name ? { cust_name: { $regex: name, $options: "i" } } : {}),
-      };
+      if (comp_code) {
+        const compNum = Number(comp_code);
+        query.comp_code = Number.isNaN(compNum)
+          ? comp_code
+          : { $in: [comp_code, String(compNum)] };
+      }
+
+      if (area) query.cust_area = area;
+      if (name) query.cust_name = { $regex: name, $options: "i" };
 
       const totalMatching = await CustMast.countDocuments(query);
 
@@ -1975,6 +1971,7 @@ getAllShopDetails: async (req, res) => {
 
       return res.status(200).json({
         users: customers.map((customer) => ({
+          comp_code: customer.comp_code,
           cust_code: customer.cust_code,
           cust_name: customer.cust_name,
           cust_phone: customer.cust_phone || "N/A",
