@@ -1,7 +1,15 @@
 // middleware/auth.js — full replacement.
+//
+// Unlike a fully stateless JWT, this middleware performs one lightweight
+// DB check per request: does (comp_code, mac_address) still exist in the
+// whitelist? This is what makes admin deletion take effect immediately,
+// rather than waiting out the JWT's 7-day expiry.
+//
+// The client must send its device's mac_address on every authenticated
+// request (not just at login) via the `x-mac-address` header.
 import jwt from "jsonwebtoken";
 import dotenv from "dotenv";
-import { isSessionActive, touchSession } from "../utils/sessionManager.js";
+import WhitelistedDevice from "../models/WhitelistedDevice.js";
 
 dotenv.config();
 
@@ -31,23 +39,24 @@ const auth = async (req, res, next) => {
       return res.status(401).json({ msg: "Token missing comp_code" });
     }
 
-    // ✅ NEW: confirm this token's session hasn't been revoked/logged out.
-    // decoded.jti is set by jwt.sign(..., { jwtid: sessionResult.jti }) at login.
-    const jti = decoded.jti;
-    if (!jti) {
-      // Tokens issued before this feature shipped won't have a jti.
-      // Reject them so all active sessions go through the new session tracking.
-      return res.status(401).json({ msg: "Session not recognized, please log in again" });
+    const macAddress = req.header("x-mac-address");
+
+    if (!macAddress) {
+      return res.status(401).json({ msg: "Device identifier missing, please log in again" });
     }
 
-    const active = await isSessionActive(jti);
-    if (!active) {
-      return res.status(401).json({ msg: "Session expired or logged out, please log in again" });
+    const stillWhitelisted = await WhitelistedDevice.findOne({
+      comp_code: req.comp_code,
+      mac_address: String(macAddress).trim(),
+    }).lean();
+
+    if (!stillWhitelisted) {
+      return res.status(401).json({
+        msg: "This device's access has been revoked. Please contact your admin.",
+      });
     }
 
-    req.jti = jti;
-    touchSession(jti); // fire-and-forget, doesn't block the request
-
+    req.mac_address = macAddress;
     next();
   } catch (err) {
     return res.status(401).json({ msg: "Token is not valid" });

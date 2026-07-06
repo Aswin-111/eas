@@ -1,24 +1,18 @@
-// controllers/auth.controller.js — replace the existing file's `login`
-// export with this version. Admin login is left session-less (unchanged)
-// since session limits apply to comp_code users, not admins — adjust if you
-// want admins limited too.
-
+// controllers/auth.controller.js — full replacement.
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import dotenv from "dotenv";
 import UserMast from "../models/UserMast.js";
 import Admin from "../models/Admin.js";
-import { tryCreateSession, formatSessionPublic } from "../utils/sessionManager.js";
+import WhitelistedDevice from "../models/WhitelistedDevice.js";
 
 dotenv.config();
 
-const TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60; // 7d, matches existing expiresIn: "7d"
-
 export const login = async (req, res) => {
-  const { user_name, user_password, device_label } = req.body;
+  const { user_name, user_password, mac_address } = req.body;
 
   try {
-    // ✅ 1. CHECK ADMIN FIRST (unchanged — admins are not session-limited)
+    // ✅ 1. CHECK ADMIN FIRST (unchanged — admins are not MAC-restricted)
     const admin = await Admin.findOne({ username: user_name });
 
     if (admin) {
@@ -56,29 +50,26 @@ export const login = async (req, res) => {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
-    // ✅ 3. ENFORCE PER-USER SESSION LIMIT (new)
-    const ip_address =
-      req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.socket?.remoteAddress || "";
-    const user_agent = req.headers["user-agent"] || "";
+    // ✅ 3. MAC WHITELIST CHECK (new — replaces the old session-limit feature)
+    const macAddress = String(mac_address || "").trim();
 
-    const sessionResult = await tryCreateSession({
-      comp_code: user.comp_code,
-      user_id: user.user_id,
-      expiresInSeconds: TOKEN_TTL_SECONDS,
-      device_label,
-      user_agent,
-      ip_address,
-    });
+    if (!macAddress) {
+      return res.status(400).json({ message: "mac_address is required" });
+    }
 
-    if (!sessionResult.allowed) {
-      return res.status(409).json({
-        message: `Device login limit reached (${sessionResult.limit}). Log out from another device to continue.`,
-        limit: sessionResult.limit,
-        active_sessions: sessionResult.active_sessions,
+    const isWhitelisted = await WhitelistedDevice.findOne({
+      comp_code: String(user.comp_code),
+      mac_address: macAddress,
+    }).lean();
+
+    if (!isWhitelisted) {
+      return res.status(403).json({
+        message: "This device is not approved. Please ask your admin to approve this login.",
+        mac_address: macAddress,
       });
     }
 
-    // ✅ 4. USER TOKEN — now carries jti, ties this token to its session record
+    // ✅ 4. USER TOKEN (unchanged from original — no session/jti tracking)
     const payload = {
       user: {
         role: "user",
@@ -90,14 +81,12 @@ export const login = async (req, res) => {
     };
 
     const token = jwt.sign(payload, process.env.JWT_SECRET || "supersecret", {
-      expiresIn: TOKEN_TTL_SECONDS,
-      jwtid: sessionResult.jti,
+      expiresIn: "7d",
     });
 
     return res.json({
       token,
       user: payload.user,
-      session: formatSessionPublic(sessionResult.session),
     });
   } catch (error) {
     console.error("Login error:", error);

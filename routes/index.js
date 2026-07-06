@@ -5,15 +5,15 @@ import { login } from "../controllers/auth.controller.js";
 import custController from "../controllers/cust.controller.js";
 import auth from "../middleware/auth.js";
 import adminAuth from "../middleware/adminAuth.js";
+import deviceWhitelistController from "../controllers/deviceWhitelist.controller.js";
 router.get("/", (req, res) => {
   res.send("Welcome to the API");
 });
 
 router.post("/login", login);
-// ✅ User session self-service (requires normal user auth)
-router.post("/logout", auth, sessionController.logout);
-router.get("/my-sessions", auth, sessionController.getMySessions);
-router.delete("/my-sessions/:session_id", auth, sessionController.revokeMySession);
+
+;
+
 // ✅ Protected routes (comp_code comes from token)
 
 router.get("/users", adminAuth, custController.getAllUsers);
@@ -30,10 +30,12 @@ router.get(
 router.put("/orders/:ord_no", auth, custController.updateOrderDetails);
 router.delete("/orders/:ord_no", auth, custController.deleteOrder);
 
-// ✅ Admin session management (requires adminAuth)
-router.put("/admin/session-limit", adminAuth, sessionController.setSessionLimit);
-router.get("/admin/sessions", adminAuth, sessionController.getSessionsForCompany);
-router.delete("/admin/sessions/:session_id", adminAuth, sessionController.adminRevokeSession);
+router.post("/admin/whitelist-device", adminAuth, deviceWhitelistController.addWhitelistedDevice);
+router.get("/admin/whitelisted-devices", adminAuth, deviceWhitelistController.getWhitelistedDevices);
+router.patch("/admin/whitelisted-devices/:device_id", adminAuth, deviceWhitelistController.editWhitelistedDevice);
+router.delete("/admin/whitelisted-devices/:device_id", adminAuth, deviceWhitelistController.removeWhitelistedDevice);
+
+
 
 // ============================================================
 // ✅ NEW SYNC ROUTES (Upsert Logic)
