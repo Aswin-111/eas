@@ -4,6 +4,7 @@ const router = express.Router();
 
 import custController from "../controllers/cust.controller.js";
 import auth from "../middleware/auth.js";
+import billingAuth from "../middleware/billingAuth.js";
 import adminAuth from "../middleware/adminAuth.js";
 import deviceWhitelistController from "../controllers/deviceWhitelist.controller.js";
 import { login, billingAdminLogin } from "../controllers/auth.controller.js";
@@ -46,29 +47,29 @@ router.get("/admin/companies", adminAuth, custController.getAllCompanies);
 // These routes handle the "Update if exists, Insert if new" logic
 // based on the composite keys (comp_code + item_code/cust_code/user_id)
 // ============================================================
-router.get("/sync-status/:batch_id", auth, custController.getSyncStatus);
-router.post("/sync-itemmast", auth, custController.syncItemMast);
-router.post("/sync-custmast", auth, custController.syncCustMast);
+router.get("/sync-status/:batch_id", billingAuth, custController.getSyncStatus);
+router.post("/sync-itemmast", billingAuth, custController.syncItemMast);
+router.post("/sync-custmast", billingAuth, custController.syncCustMast);
 router.post("/sync-usermast", adminAuth, custController.syncUserMast);
 
 // ============================================================
 
 // ✅ Get Pending Orders
-router.get("/pending-orders", auth, custController.getPendingOrders);
+router.get("/pending-orders", billingAuth, custController.getPendingOrders);
 // ✅ Update Order Status
-router.post("/update-order-status", auth, custController.updateOrderStatus);
+router.post("/update-order-status", billingAuth, custController.updateOrderStatus);
 
 // ✅ clean duplicates (recommended)
-router.post("/deletecompmast", custController.deleteCompMast);
-router.post("/deleteitemmast", custController.deleteItemMast);
+router.post("/deletecompmast",billingAuth, custController.deleteCompMast);
+router.post("/deleteitemmast",billingAuth, custController.deleteItemMast);
 
 // ✅ VB6 Pull Endpoints (Mongo -> JSON)
-router.get("/pull-ordermast", auth, custController.pullOrderMast);
-router.get("/pull-ordertrxfile", auth, custController.pullOrderTrxfile);
+router.get("/pull-ordermast", billingAuth, custController.pullOrderMast);
+router.get("/pull-ordertrxfile", billingAuth, custController.pullOrderTrxfile);
 
 
-router.post("/delete-all-custmast", auth, custController.deleteAllCustMast);
-router.post("/delete-all-itemmast", auth, custController.deleteAllItemMast);
-router.post("/delete-all-usermast", auth, custController.deleteAllUserMast);
+router.post("/delete-all-custmast", billingAuth, custController.deleteAllCustMast);
+router.post("/delete-all-itemmast", billingAuth, custController.deleteAllItemMast);
+router.post("/delete-all-usermast", billingAuth, custController.deleteAllUserMast);
 export default router;
 
