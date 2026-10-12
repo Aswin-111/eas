@@ -11,7 +11,10 @@ import CompMast from "../models/CompMast.js";
 
 import UserMast from "../models/UserMast.js";
 import puppeteer from "puppeteer";
-import pdfkit from "pdfkit";
+import PDFDocument from "pdfkit";
+import fs from "fs/promises";
+import path from "path";
+import { fileURLToPath } from "url";
 import bcrypt from "bcryptjs";
 import { enqueueItemSyncBatch, getBatchStatus } from "../queues/itemSyncQueue.js";
 
@@ -1009,15 +1012,28 @@ getAllShopDetails: async (req, res) => {
       await ordMast.save();
       await OrdTrxfile.insertMany(trxItems);
 
-      const htmlBill = await generateHTMLBill(
-        comp_code,
-        ord_no,
-        ordMast,
-        trxItems
-      );
+      let pdfBuffer;
+      let renderer;
+      try {
+        ({ pdfBuffer, renderer } = await generateBillPdf(
+          comp_code,
+          ord_no,
+          ordMast,
+          trxItems
+        ));
+      } catch (pdfErr) {
+        // Both Chrome and PDFKit failed. The order IS saved - say so,
+        // so nobody re-submits it.
+        console.error(`Bill PDF failed for order ${ord_no}:`, pdfErr);
+        return res.status(500).json({
+          message: `Order #${ord_no} was saved, but the bill PDF could not be generated. Do not submit again.`,
+          ord_no,
+          order_saved: true,
+          error: pdfErr.message,
+        });
+      }
 
-      const pdfBuffer = await generatePdfBuffer(htmlBill);
-
+      res.set("X-Bill-Renderer", renderer); // "chrome" or "pdfkit"
       res.set(
         "Content-Disposition",
         `attachment; filename="bill_${ord_no}.pdf"`
@@ -2049,251 +2065,457 @@ getAllShopDetails: async (req, res) => {
   },
 };
 
+// ==========================================
+// BILL: HTML template -> PDF (Puppeteer)
+// ==========================================
+
+const __dirname_ctrl = path.dirname(fileURLToPath(import.meta.url));
+const ASSETS_DIR = path.join(__dirname_ctrl, "..", "assets");
+
+const escapeHtml = (v) =>
+  String(v ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+
+const money = (n) => Number(n || 0).toFixed(2);
+
+// Logo lookup: assets/logos/<comp_code>.(png|jpg|jpeg|svg|webp), else assets/logo.*
+const LOGO_MIMES = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", svg: "image/svg+xml", webp: "image/webp" };
+const logoCache = new Map();
+async function getLogo(comp_code) {
+  if (logoCache.has(comp_code)) return logoCache.get(comp_code);
+
+  const candidates = [];
+  for (const ext of Object.keys(LOGO_MIMES)) candidates.push([path.join(ASSETS_DIR, "logos", `${comp_code}.${ext}`), ext]);
+  for (const ext of Object.keys(LOGO_MIMES)) candidates.push([path.join(ASSETS_DIR, `logo.${ext}`), ext]);
+
+  let logo = null;
+  for (const [file, ext] of candidates) {
+    try {
+      logo = { buf: await fs.readFile(file), ext, mime: LOGO_MIMES[ext] };
+      break;
+    } catch {
+      /* try next */
+    }
+  }
+  logoCache.set(comp_code, logo);
+  return logo;
+}
+
+// Embedded as a data URI so Chrome never has to fetch anything over the network.
+async function getLogoDataUri(comp_code) {
+  const logo = await getLogo(comp_code);
+  return logo ? `data:${logo.mime};base64,${logo.buf.toString("base64")}` : null;
+}
+
+async function getCompany(comp_code) {
+  return (await CompMast.findOne({ comp_code }).lean().catch(() => null)) || {};
+}
+
 async function generateHTMLBill(comp_code, ord_no, ordMast, trxItems) {
   const total = Number(ordMast.trx_total || 0);
   const net = Number(ordMast.trx_netamount || total);
+
+  const company = await getCompany(comp_code);
+  const logo = await getLogoDataUri(comp_code);
+
+  const compName = company.comp_name || `Company ${comp_code}`;
+  const compAddress = [company.comp_address_one, company.comp_address_two].filter(Boolean).join(", ");
+  const compContact = [
+    company.comp_phone && `Ph: ${company.comp_phone}`,
+    company.comp_email,
+  ].filter(Boolean).join(" · ");
 
   const rowsHtml = trxItems
     .map(
       (item, index) => `
       <tr>
         <td>${index + 1}</td>
-        <td>${item.item_name}</td>
-        <td class="num">${item.item_qty}</td>
-        <td class="num">${Number(item.item_mrp || 0).toFixed(2)}</td>
-        <td class="num">${Number(item.item_price || 0).toFixed(2)}</td>
-        <td class="num">${Number(item.item_tax || 0).toFixed(2)}</td>
-        <td class="num">${Number(item.item_disc || 0).toFixed(2)}</td>
-        <td class="num">${Number(item.trx_total || 0).toFixed(2)}</td>
-      </tr>
-    `
+        <td class="item">${escapeHtml(item.item_name)}</td>
+        <td class="num">${escapeHtml(item.item_qty)}</td>
+        <td class="num">${money(item.item_mrp)}</td>
+        <td class="num">${money(item.item_price)}</td>
+        <td class="num">${money(item.item_tax)}</td>
+        <td class="num">${money(item.item_disc)}</td>
+        <td class="num">${money(item.trx_total)}</td>
+      </tr>`
     )
     .join("");
 
-  const html = `
-    <!DOCTYPE html>
-    <html>
-      <head>
-        <meta charset="utf-8" />
-        <title>Bill - ${ord_no}</title>
-        <style>
-          * {
-            box-sizing: border-box;
-          }
-          body {
-            margin: 0;
-            padding: 16px;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
-              Roboto, Helvetica, Arial, sans-serif;
-            background: #f4f4f8;
-            font-size: 12px;
-            color: #222;
-          }
-          .wrapper {
-            max-width: 640px;
-            margin: 0 auto;
-          }
-          .card {
-            background: #fff;
-            border-radius: 8px;
-            padding: 16px 18px 20px;
-            box-shadow: 0 2px 6px rgba(0,0,0,0.08);
-          }
+  return `<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Bill - ${ord_no}</title>
+    <style>
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", "Noto Sans Malayalam", Helvetica, Arial, sans-serif;
+        font-size: 11px;
+        color: #222;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+      }
+      .header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 12px;
+        padding-bottom: 10px;
+        border-bottom: 2px solid #6c63ff;
+        margin-bottom: 10px;
+      }
+      .company { display: flex; gap: 10px; align-items: center; }
+      .logo { max-height: 52px; max-width: 110px; object-fit: contain; }
+      .brand { font-size: 16px; font-weight: 700; letter-spacing: 0.3px; }
+      .sub { font-size: 9.5px; color: #666; line-height: 1.4; }
+      .invoice { text-align: right; }
+      .invoice-title { font-size: 15px; font-weight: 700; color: #6c63ff; }
 
-          .header-top {
-            display: flex;
-            justify-content: space-between;
-            align-items: flex-start;
-            margin-bottom: 12px;
-          }
-          .brand {
-            font-size: 18px;
-            font-weight: 700;
-            letter-spacing: 0.5px;
-          }
-          .invoice-title {
-            font-size: 16px;
-            font-weight: 600;
-            text-align: right;
-          }
+      .meta { display: flex; gap: 12px; margin-bottom: 10px; font-size: 10px; }
+      .meta-block { flex: 1; background: #f6f6fb; border-radius: 6px; padding: 6px 8px; }
+      .meta-label { font-weight: 600; }
+      .meta-row { margin-bottom: 2px; }
 
-          .meta {
-            display: flex;
-            justify-content: space-between;
-            gap: 12px;
-            margin-bottom: 12px;
-            font-size: 11px;
-          }
-          .meta-block {
-            flex: 1;
-          }
-          .meta-label {
-            font-weight: 600;
-          }
-          .meta-row {
-            margin-bottom: 2px;
-          }
+      table { width: 100%; border-collapse: collapse; }
+      thead { display: table-header-group; } /* repeat header on each page */
+      tr { page-break-inside: avoid; }
+      th, td { padding: 5px 4px; border-bottom: 1px solid #e1e1e6; font-size: 10px; vertical-align: top; }
+      th { background: #6c63ff; color: #fff; font-weight: 600; text-align: left; }
+      th.num { text-align: right; }
+      tbody tr:nth-child(even) td { background: #fafaff; }
+      .num { text-align: right; white-space: nowrap; }
+      .item { word-break: break-word; }
 
-          table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 8px;
-          }
-          th, td {
-            padding: 6px 5px;
-            border-bottom: 1px solid #e1e1e6;
-          }
-          th {
-            background: #fafafa;
-            font-weight: 600;
-            font-size: 11px;
-          }
-          td {
-            font-size: 11px;
-          }
-          .num {
-            text-align: right;
-            white-space: nowrap;
-          }
-          .totals {
-            margin-top: 10px;
-            font-size: 12px;
-          }
-          .totals-row {
-            display: flex;
-            justify-content: flex-end;
-          }
-          .totals-label {
-            font-weight: 600;
-            margin-right: 8px;
-          }
-          .totals-value {
-            min-width: 80px;
-            text-align: right;
-          }
-        </style>
-      </head>
-      <body>
-        <div class="wrapper">
-          <div class="card">
-            <div class="header-top">
-              <div>
-                <div class="brand">Company ${comp_code}</div>
-                <div style="font-size:11px;color:#666;">Invoice / Bill</div>
-              </div>
-              <div class="invoice-title">
-                Bill #${ord_no}
-              </div>
-            </div>
+      .totals { margin-top: 10px; margin-left: auto; width: 55%; page-break-inside: avoid; }
+      .totals-row { display: flex; justify-content: space-between; padding: 3px 0; font-size: 11px; }
+      .totals-row.net { border-top: 1px solid #ccc; margin-top: 3px; padding-top: 6px; font-size: 13px; font-weight: 700; }
 
-            <div class="meta">
-              <div class="meta-block">
-                <div class="meta-row"><span class="meta-label">Order No:</span> ${ord_no}</div>
-                <div class="meta-row"><span class="meta-label">Date:</span> ${ordMast.ord_date}</div>
-                <div class="meta-row"><span class="meta-label">Time:</span> ${ordMast.ord_time}</div>
-              </div>
-              <div class="meta-block">
-                <div class="meta-row"><span class="meta-label">Customer Code:</span> ${ordMast.act_code || "-"}</div>
-                <div class="meta-row"><span class="meta-label">Customer Name:</span> ${ordMast.act_name || "-"}</div>
-              </div>
-            </div>
-
-            <table>
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>Item</th>
-                  <th class="num">Qty</th>
-                  <th class="num">MRP</th>
-                  <th class="num">Rate</th>
-                  <th class="num">Tax %</th>
-                  <th class="num">Disc</th>
-                  <th class="num">Subtotal</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${rowsHtml}
-              </tbody>
-            </table>
-
-            <div class="totals">
-              <div class="totals-row">
-                <div class="totals-label">Total:</div>
-                <div class="totals-value">${total.toFixed(2)}</div>
-              </div>
-              <div class="totals-row">
-                <div class="totals-label">Net Amount:</div>
-                <div class="totals-value">${net.toFixed(2)}</div>
-              </div>
-            </div>
-          </div>
+      .footer { margin-top: 16px; text-align: center; font-size: 9.5px; color: #777; }
+    </style>
+  </head>
+  <body>
+    <div class="header">
+      <div class="company">
+        ${logo ? `<img class="logo" src="${logo}" alt="logo" />` : ""}
+        <div>
+          <div class="brand">${escapeHtml(compName)}</div>
+          ${compAddress ? `<div class="sub">${escapeHtml(compAddress)}</div>` : ""}
+          ${compContact ? `<div class="sub">${escapeHtml(compContact)}</div>` : ""}
+          ${company.comp_gst_num ? `<div class="sub">GSTIN: ${escapeHtml(company.comp_gst_num)}</div>` : ""}
         </div>
-      </body>
-    </html>
-  `;
+      </div>
+      <div class="invoice">
+        <div class="invoice-title">Bill #${ord_no}</div>
+        <div class="sub">${escapeHtml(ordMast.ord_date)} · ${escapeHtml(ordMast.ord_time)}</div>
+      </div>
+    </div>
 
-  return html;
+    <div class="meta">
+      <div class="meta-block">
+        <div class="meta-row"><span class="meta-label">Order No:</span> ${ord_no}</div>
+        <div class="meta-row"><span class="meta-label">Date:</span> ${escapeHtml(ordMast.ord_date)}</div>
+        <div class="meta-row"><span class="meta-label">Time:</span> ${escapeHtml(ordMast.ord_time)}</div>
+      </div>
+      <div class="meta-block">
+        <div class="meta-row"><span class="meta-label">Customer:</span> ${escapeHtml(ordMast.act_name || "-")}</div>
+        <div class="meta-row"><span class="meta-label">Code:</span> ${escapeHtml(ordMast.act_code || "-")}</div>
+        ${ordMast.act_phone ? `<div class="meta-row"><span class="meta-label">Phone:</span> ${escapeHtml(ordMast.act_phone)}</div>` : ""}
+      </div>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Item</th>
+          <th class="num">Qty</th>
+          <th class="num">MRP</th>
+          <th class="num">Rate</th>
+          <th class="num">Tax %</th>
+          <th class="num">Disc</th>
+          <th class="num">Subtotal</th>
+        </tr>
+      </thead>
+      <tbody>${rowsHtml}</tbody>
+    </table>
+
+    <div class="totals">
+      <div class="totals-row"><span>Items</span><span>${trxItems.length}</span></div>
+      <div class="totals-row"><span>Total</span><span>${money(total)}</span></div>
+      <div class="totals-row net"><span>Net Amount</span><span>${money(net)}</span></div>
+    </div>
+
+    ${company.inv_msgs ? `<div class="footer">${escapeHtml(company.inv_msgs)}</div>` : ""}
+  </body>
+</html>`;
 }
 
-// Puppeteer PDF with better sizing
-// async function generatePdfBuffer(html) {
-//   const browser = await puppeteer.launch({
-//     headless: "new",
-//     executablePath:
-//       process.env.CHROME_PATH ||
-//       "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-//     args: ["--no-sandbox", "--disable-setuid-sandbox"],
-//   });
+// ---- Puppeteer: one shared browser, reused for every bill ----
+// Uses the Chrome that Puppeteer downloads itself (chrome-headless-shell).
+// Snap Chromium (/snap/bin/chromium) is ignored: its sandbox kills the
+// process when it's launched from Node, which caused
+// "Failed to launch the browser process ... ptrace: Input/output error".
+let browserPromise = null;
 
-//   try {
-//     const page = await browser.newPage();
-//     await page.setContent(html, { waitUntil: "networkidle0" });
+function resolveExecutablePath() {
+  const p = process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_PATH;
+  if (!p || p.includes("/snap/")) return undefined; // let Puppeteer use its own Chrome
+  return p;
+}
 
-//     const pdfBuffer = await page.pdf({
-//       format: "A5",
-//       printBackground: true,
-//       margin: { top: "8mm", right: "8mm", bottom: "8mm", left: "8mm" },
-//     });
+async function getBrowser() {
+  if (browserPromise) {
+    const existing = await browserPromise.catch(() => null);
+    if (existing && existing.connected) return existing;
+    browserPromise = null;
+  }
 
-//     return pdfBuffer;
-//   } finally {
-//     await browser.close();
-//   }
-// }
-
-async function generatePdfBuffer(html) {
-  const executablePath =
-    process.env.PUPPETEER_EXECUTABLE_PATH ||
-    process.env.CHROME_PATH ||
-    "/snap/bin/chromium"; // fallback
-
-  const browser = await puppeteer.launch({
-    headless: "new",
-    executablePath,
+  browserPromise = puppeteer.launch({
+    headless: "shell",
+    timeout: 20000,
+    executablePath: resolveExecutablePath(),
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
       "--disable-dev-shm-usage",
       "--disable-gpu",
-      "--no-zygote",
-      "--single-process",
+      "--font-render-hinting=none",
     ],
   });
 
   try {
-    const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: "networkidle0" });
+    const browser = await browserPromise;
+    browser.on("disconnected", () => {
+      browserPromise = null;
+    });
+    return browser;
+  } catch (err) {
+    browserPromise = null;
+    throw err;
+  }
+}
 
-    return await page.pdf({
+async function generatePdfBuffer(html, attempt = 1) {
+  let page;
+  try {
+    const browser = await getBrowser();
+    page = await browser.newPage();
+    await page.setContent(html, { waitUntil: "load", timeout: 30000 });
+    const pdf = await page.pdf({
       format: "A5",
       printBackground: true,
       margin: { top: "8mm", right: "8mm", bottom: "8mm", left: "8mm" },
     });
+    return Buffer.from(pdf);
+  } catch (err) {
+    // Browser may have crashed between orders: relaunch once and retry.
+    if (attempt === 1) {
+      browserPromise = null;
+      return generatePdfBuffer(html, 2);
+    }
+    throw err;
   } finally {
-    await browser.close();
+    if (page) await page.close().catch(() => {});
   }
-
 }
 
+// ---- Main entry: Chrome first, PDFKit fallback ----
+// If Chrome fails, skip it for a few minutes so orders don't keep waiting
+// on a broken browser, then try it again automatically.
+const CHROME_RETRY_AFTER_MS = 5 * 60 * 1000;
+let chromeDisabledUntil = 0;
+
+async function generateBillPdf(comp_code, ord_no, ordMast, trxItems) {
+  if (Date.now() >= chromeDisabledUntil) {
+    try {
+      const html = await generateHTMLBill(comp_code, ord_no, ordMast, trxItems);
+      const pdfBuffer = await generatePdfBuffer(html);
+      return { pdfBuffer, renderer: "chrome" };
+    } catch (chromeErr) {
+      chromeDisabledUntil = Date.now() + CHROME_RETRY_AFTER_MS;
+      console.error(
+        `[bill] Chrome PDF failed for order ${ord_no}, falling back to PDFKit ` +
+          `(Chrome skipped for ${CHROME_RETRY_AFTER_MS / 60000} min):`,
+        chromeErr.message
+      );
+    }
+  }
+
+  const pdfBuffer = await generatePdfKitBill(comp_code, ord_no, ordMast, trxItems);
+  return { pdfBuffer, renderer: "pdfkit" };
+}
+
+// ---- PDFKit fallback: same bill layout, drawn without a browser ----
+// Note: PDFKit's built-in Helvetica only covers English text, and only
+// PNG/JPG logos can be drawn (SVG/WEBP logos are skipped here).
+async function generatePdfKitBill(comp_code, ord_no, ordMast, trxItems) {
+  const company = await getCompany(comp_code);
+  const logo = await getLogo(comp_code);
+
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: "A5", margin: 23 }); // ~8mm
+    const chunks = [];
+    doc.on("data", (c) => chunks.push(c));
+    doc.on("end", () => resolve(Buffer.concat(chunks)));
+    doc.on("error", reject);
+
+    const ACCENT = "#6c63ff";
+    const TEXT = "#222222";
+    const MUTED = "#666666";
+    const LINE = "#e1e1e6";
+
+    const left = doc.page.margins.left;
+    const W = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+    const bottom = () => doc.page.height - doc.page.margins.bottom;
+    let y = doc.page.margins.top;
+
+    // ---- Header: logo + company | bill no ----
+    let textX = left;
+    if (logo && (logo.ext === "png" || logo.ext === "jpg" || logo.ext === "jpeg")) {
+      try {
+        doc.image(logo.buf, left, y, { fit: [70, 40], valign: "center" });
+        textX = left + 78;
+      } catch {
+        /* bad image file - skip logo */
+      }
+    }
+    const rightW = 95;
+    const compW = W - (textX - left) - rightW - 6;
+
+    doc.fillColor(TEXT).font("Helvetica-Bold").fontSize(13)
+      .text(company.comp_name || `Company ${comp_code}`, textX, y, { width: compW });
+    doc.font("Helvetica").fontSize(7.5).fillColor(MUTED);
+    const address = [company.comp_address_one, company.comp_address_two].filter(Boolean).join(", ");
+    const contact = [company.comp_phone && `Ph: ${company.comp_phone}`, company.comp_email].filter(Boolean).join("  ·  ");
+    if (address) doc.text(address, textX, doc.y + 1, { width: compW });
+    if (contact) doc.text(contact, textX, doc.y + 1, { width: compW });
+    if (company.comp_gst_num) doc.text(`GSTIN: ${company.comp_gst_num}`, textX, doc.y + 1, { width: compW });
+    const compBottom = doc.y;
+
+    doc.fillColor(ACCENT).font("Helvetica-Bold").fontSize(13)
+      .text(`Bill #${ord_no}`, left + W - rightW, y, { width: rightW, align: "right" });
+    doc.fillColor(MUTED).font("Helvetica").fontSize(7.5)
+      .text(`${ordMast.ord_date || ""}  ·  ${ordMast.ord_time || ""}`, left + W - rightW, doc.y + 2, { width: rightW, align: "right" });
+
+    y = Math.max(compBottom, y + 42) + 6;
+    doc.moveTo(left, y).lineTo(left + W, y).lineWidth(1.5).strokeColor(ACCENT).stroke();
+    y += 8;
+
+    // ---- Order / customer boxes ----
+    const boxW = (W - 8) / 2;
+    const metaBox = (x, rows) => {
+      const h = rows.length * 11 + 8;
+      doc.roundedRect(x, y, boxW, h, 4).fill("#f6f6fb");
+      rows.forEach(([label, value], i) => {
+        doc.fillColor(TEXT).font("Helvetica-Bold").fontSize(7.5)
+          .text(`${label} `, x + 6, y + 5 + i * 11, { continued: true, width: boxW - 12, lineBreak: false, ellipsis: true })
+          .font("Helvetica").text(String(value ?? "-"));
+      });
+      return h;
+    };
+    const customerRows = [
+      ["Customer:", ordMast.act_name || "-"],
+      ["Code:", ordMast.act_code || "-"],
+    ];
+    if (ordMast.act_phone) customerRows.push(["Phone:", ordMast.act_phone]);
+    const h1 = metaBox(left, [["Order No:", ord_no], ["Date:", ordMast.ord_date], ["Time:", ordMast.ord_time]]);
+    const h2 = metaBox(left + boxW + 8, customerRows);
+    y += Math.max(h1, h2) + 8;
+
+    // ---- Items table ----
+    const cols = [
+      { key: "sl", label: "#", w: 16, align: "left" },
+      { key: "name", label: "Item", w: 0, align: "left" }, // takes the remaining width
+      { key: "qty", label: "Qty", w: 28, align: "right" },
+      { key: "mrp", label: "MRP", w: 38, align: "right" },
+      { key: "rate", label: "Rate", w: 38, align: "right" },
+      { key: "tax", label: "Tax %", w: 30, align: "right" },
+      { key: "disc", label: "Disc", w: 30, align: "right" },
+      { key: "total", label: "Subtotal", w: 48, align: "right" },
+    ];
+    cols[1].w = W - cols.reduce((sum, c) => sum + c.w, 0);
+    const PAD = 4;
+
+    const rowHeight = (values, font) => {
+      doc.font(font).fontSize(7.5);
+      return Math.max(...cols.map((c) => doc.heightOfString(String(values[c.key]), { width: c.w - 4 }))) + PAD * 2;
+    };
+    const drawCells = (values, color) => {
+      let x = left;
+      doc.fillColor(color);
+      for (const c of cols) {
+        doc.text(String(values[c.key]), x + 2, y + PAD, { width: c.w - 4, align: c.align });
+        x += c.w;
+      }
+    };
+    const headerValues = Object.fromEntries(cols.map((c) => [c.key, c.label]));
+    const drawHeader = () => {
+      const h = rowHeight(headerValues, "Helvetica-Bold");
+      doc.rect(left, y, W, h).fill(ACCENT);
+      doc.font("Helvetica-Bold").fontSize(7.5);
+      drawCells(headerValues, "#ffffff");
+      y += h;
+    };
+
+    drawHeader();
+    trxItems.forEach((item, i) => {
+      const values = {
+        sl: i + 1,
+        name: item.item_name || "",
+        qty: item.item_qty ?? 0,
+        mrp: money(item.item_mrp),
+        rate: money(item.item_price),
+        tax: money(item.item_tax),
+        disc: money(item.item_disc),
+        total: money(item.trx_total),
+      };
+      const h = rowHeight(values, "Helvetica");
+      if (y + h > bottom()) {
+        doc.addPage();
+        y = doc.page.margins.top;
+        drawHeader();
+      }
+      if (i % 2 === 1) doc.rect(left, y, W, h).fill("#fafaff");
+      doc.font("Helvetica").fontSize(7.5);
+      drawCells(values, TEXT);
+      y += h;
+      doc.moveTo(left, y).lineTo(left + W, y).lineWidth(0.5).strokeColor(LINE).stroke();
+    });
+
+    // ---- Totals ----
+    const total = Number(ordMast.trx_total || 0);
+    const net = Number(ordMast.trx_netamount || total);
+    const footerH = company.inv_msgs ? 24 : 0;
+    if (y + 60 + footerH > bottom()) {
+      doc.addPage();
+      y = doc.page.margins.top;
+    }
+    y += 8;
+    const tx = left + W * 0.45;
+    const tw = W * 0.55;
+    const totalRow = (label, value, bold, size) => {
+      doc.fillColor(TEXT).font(bold ? "Helvetica-Bold" : "Helvetica").fontSize(size);
+      doc.text(label, tx, y, { width: tw / 2 });
+      doc.text(String(value), tx + tw / 2, y, { width: tw / 2, align: "right" });
+      y += size + 6;
+    };
+    totalRow("Items", trxItems.length, false, 8.5);
+    totalRow("Total", money(total), false, 8.5);
+    doc.moveTo(tx, y).lineTo(tx + tw, y).lineWidth(0.7).strokeColor("#cccccc").stroke();
+    y += 5;
+    totalRow("Net Amount", money(net), true, 11);
+
+    if (company.inv_msgs) {
+      doc.fillColor("#777777").font("Helvetica").fontSize(7.5)
+        .text(company.inv_msgs, left, y + 10, { width: W, align: "center" });
+    }
+
+    doc.end();
+  });
+}
 
 export default custController;
